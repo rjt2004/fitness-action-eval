@@ -92,12 +92,49 @@ def draw_pose_landmarker(frame_bgr, pose_landmarks) -> None:
                 cv2.line(frame_bgr, points[a], points[b], (0, 200, 255), 2)
 
 
-def first_person_33(result) -> Optional[List]:
-    if not result.pose_landmarks:
-        return None
-    if len(result.pose_landmarks) == 0:
-        return None
-    return result.pose_landmarks[0]
+def pose_bbox(landmarks, width: int, height: int) -> Tuple[int, int, int, int, float, float, float]:
+    xs = [lm.x * width for lm in landmarks]
+    ys = [lm.y * height for lm in landmarks]
+    x1, x2 = int(min(xs)), int(max(xs))
+    y1, y2 = int(min(ys)), int(max(ys))
+    cx = float((x1 + x2) / 2.0)
+    cy = float((y1 + y2) / 2.0)
+    area = float(max(1, (x2 - x1) * (y2 - y1)))
+    return x1, y1, x2, y2, cx, cy, area
+
+
+def select_target_pose(
+    pose_landmarks, width: int, height: int, prev_center: Optional[Tuple[float, float]]
+):
+    if not pose_landmarks:
+        return None, prev_center, None
+
+    frame_cx = width / 2.0
+    frame_cy = height / 2.0
+    diag = (width**2 + height**2) ** 0.5 + 1e-6
+    best_idx = -1
+    best_score = -1e9
+    best_info = None
+
+    for i, landmarks in enumerate(pose_landmarks):
+        x1, y1, x2, y2, cx, cy, area = pose_bbox(landmarks, width, height)
+        center_dist = ((cx - frame_cx) ** 2 + (cy - frame_cy) ** 2) ** 0.5 / diag
+        if prev_center is None:
+            track_dist = 0.0
+        else:
+            track_dist = ((cx - prev_center[0]) ** 2 + (cy - prev_center[1]) ** 2) ** 0.5 / diag
+        area_norm = area / float(width * height + 1e-6)
+        score = (2.0 * area_norm) - (0.7 * center_dist) - (0.9 * track_dist)
+        if score > best_score:
+            best_score = score
+            best_idx = i
+            best_info = (x1, y1, x2, y2, cx, cy)
+
+    if best_idx < 0:
+        return None, prev_center, None
+    selected = pose_landmarks[best_idx]
+    next_center = (best_info[4], best_info[5])
+    return selected, next_center, best_info
 
 
 def mp33_to_openpose18_xy(landmarks33: List, width: int, height: int) -> np.ndarray:
@@ -150,8 +187,25 @@ def classify_from_window(
 
 
 def draw_prediction_overlay(
-    frame_bgr: np.ndarray, pred_label: str, prob: Optional[np.ndarray], class_names: List[str]
+    frame_bgr: np.ndarray,
+    pred_label: str,
+    prob: Optional[np.ndarray],
+    class_names: List[str],
+    target_box=None,
 ) -> None:
+    if target_box is not None:
+        x1, y1, x2, y2, _, _ = target_box
+        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 120, 255), 2)
+        cv2.putText(
+            frame_bgr,
+            "TARGET",
+            (x1, max(20, y1 - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 120, 255),
+            2,
+            cv2.LINE_AA,
+        )
     if pred_label:
         cv2.putText(
             frame_bgr,
@@ -190,6 +244,7 @@ def run_video_mode(
     class_names: List[str],
     window_size: int,
     classify_every: int,
+    num_poses: int,
 ) -> None:
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -223,12 +278,13 @@ def run_video_mode(
         min_pose_detection_confidence=0.5,
         min_pose_presence_confidence=0.5,
         min_tracking_confidence=0.5,
-        num_poses=1,
+        num_poses=num_poses,
     )
 
     history = deque(maxlen=window_size)
     pred_label = ""
     pred_prob: Optional[np.ndarray] = None
+    prev_center = None
 
     with mp_tasks_vision.PoseLandmarker.create_from_options(options) as landmarker:
         frame = first_frame
@@ -239,17 +295,21 @@ def run_video_mode(
             timestamp_ms = int((frame_idx * 1000.0) / fps)
             result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-            draw_pose_landmarker(frame, result.pose_landmarks)
-            person = first_person_33(result)
-            if person is not None:
-                pose18 = mp33_to_openpose18_xy(person, width=width, height=height)
+            target_landmarks, prev_center, target_box = select_target_pose(
+                result.pose_landmarks, width=width, height=height, prev_center=prev_center
+            )
+            if target_landmarks is not None:
+                draw_pose_landmarker(frame, [target_landmarks])
+                pose18 = mp33_to_openpose18_xy(target_landmarks, width=width, height=height)
                 history.append(pose18)
+            else:
+                target_box = None
 
             if len(history) >= window_size and frame_idx % classify_every == 0:
                 win = np.asarray(history, dtype=np.float32)
                 pred_label, pred_prob = classify_from_window(clf, win, class_names)
 
-            draw_prediction_overlay(frame, pred_label, pred_prob, class_names)
+            draw_prediction_overlay(frame, pred_label, pred_prob, class_names, target_box=target_box)
 
             if writer is not None:
                 writer.write(frame)
@@ -276,7 +336,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pose estimation + 4-action classification demo.")
     p.add_argument("--input", required=True, help="Input video path.")
     p.add_argument("--output", default=None, help="Output video path.")
-    p.add_argument("--display", action="store_true", help="Show live preview window.")
+    p.add_argument("--no_display", action="store_true", help="Disable live preview window.")
     p.add_argument("--task_model", default="pose_landmarker.task", help="Path to pose_landmarker.task.")
     p.add_argument(
         "--model_path",
@@ -293,6 +353,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=8,
         help="Run classifier every N frames after warm-up window.",
+    )
+    p.add_argument(
+        "--num_poses",
+        type=int,
+        default=4,
+        help="Maximum number of persons to detect before target selection.",
     )
     return p
 
@@ -315,12 +381,13 @@ def main() -> None:
     run_video_mode(
         input_path=args.input,
         output_path=args.output,
-        display=args.display,
+        display=not args.no_display,
         task_model=args.task_model,
         clf=clf,
         class_names=class_names,
         window_size=window_size,
         classify_every=max(1, args.classify_every),
+        num_poses=max(1, args.num_poses),
     )
 
 
