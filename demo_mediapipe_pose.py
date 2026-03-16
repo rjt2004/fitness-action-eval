@@ -1,5 +1,6 @@
 import argparse
 import os
+import time
 from typing import List, Optional, Tuple
 
 import cv2
@@ -255,6 +256,8 @@ def run_video_mode(
         num_poses=num_poses,
     )
     prev_center = None
+    prev_tick = time.perf_counter()
+    fps_ema = 0.0
     with mp_tasks_vision.PoseLandmarker.create_from_options(options) as landmarker:
         frame = first_frame
         frame_idx = 0
@@ -276,6 +279,22 @@ def run_video_mode(
                 )
             else:
                 draw_pose_landmarker(frame, result.pose_landmarks)
+
+            now_tick = time.perf_counter()
+            dt = max(1e-6, now_tick - prev_tick)
+            inst_fps = 1.0 / dt
+            fps_ema = inst_fps if fps_ema == 0.0 else (0.9 * fps_ema + 0.1 * inst_fps)
+            prev_tick = now_tick
+            cv2.putText(
+                frame,
+                f"FPS: {fps_ema:.1f}",
+                (20, 35),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
 
             if writer is not None:
                 writer.write(frame)

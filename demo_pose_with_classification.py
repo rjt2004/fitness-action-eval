@@ -1,7 +1,9 @@
 import argparse
 import json
 import os
+import time
 from collections import deque
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 import cv2
@@ -52,6 +54,65 @@ POSE_CONNECTIONS: List[Tuple[int, int]] = [
     (27, 31),
     (28, 32),
 ]
+
+COUNT_RULES = {
+    "squats": {"low": 95.0, "high": 155.0, "low_phase": "down", "high_phase": "up"},
+    "pushups": {"low": 90.0, "high": 155.0, "low_phase": "down", "high_phase": "up"},
+    "lunges": {"low": 95.0, "high": 160.0, "low_phase": "down", "high_phase": "up"},
+    # Tuned for current situp capture where torso-hip-knee angle mostly falls in ~30..130.
+    "situps": {"low": 72.0, "high": 118.0, "low_phase": "up", "high_phase": "down"},
+}
+
+
+@dataclass
+class RepCounterFSM:
+    counts: dict = field(default_factory=dict)
+    states: dict = field(default_factory=dict)
+    rep_start: dict = field(default_factory=dict)
+    segments: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for action in COUNT_RULES:
+            self.counts[action] = 0
+            self.states[action] = "unknown"
+            self.rep_start[action] = None
+            self.segments[action] = []
+
+    def update(self, action: str, metric: float, frame_idx: int) -> None:
+        if action not in COUNT_RULES or not np.isfinite(metric):
+            return
+        low = COUNT_RULES[action]["low"]
+        high = COUNT_RULES[action]["high"]
+        state = self.states[action]
+
+        if state == "unknown":
+            if metric >= high:
+                self.states[action] = "high"
+            elif metric <= low:
+                self.states[action] = "low"
+            return
+
+        if state == "high" and metric <= low:
+            self.states[action] = "low"
+            self.rep_start[action] = frame_idx
+            return
+
+        if state == "low" and metric >= high:
+            self.states[action] = "high"
+            self.counts[action] += 1
+            start_idx = self.rep_start[action] if self.rep_start[action] is not None else frame_idx
+            self.segments[action].append([int(start_idx), int(frame_idx)])
+            self.rep_start[action] = None
+
+    def current_phase(self, action: str) -> str:
+        if action not in COUNT_RULES:
+            return "n/a"
+        state = self.states[action]
+        if state == "low":
+            return COUNT_RULES[action]["low_phase"]
+        if state == "high":
+            return COUNT_RULES[action]["high_phase"]
+        return "ready"
 
 
 def ensure_parent_dir(path: str) -> None:
@@ -173,6 +234,41 @@ def mp33_to_openpose18_xy(landmarks33: List, width: int, height: int) -> np.ndar
     return pts
 
 
+def angle_deg(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+    ba = a - b
+    bc = c - b
+    denom = (np.linalg.norm(ba) * np.linalg.norm(bc))
+    if denom < 1e-6:
+        return float("nan")
+    cos_v = np.clip(np.dot(ba, bc) / denom, -1.0, 1.0)
+    return float(np.degrees(np.arccos(cos_v)))
+
+
+def lm_xy(landmarks33: List, idx: int) -> np.ndarray:
+    lm = landmarks33[idx]
+    return np.array([lm.x, lm.y], dtype=np.float32)
+
+
+def action_metric(action: str, landmarks33: List) -> float:
+    if action == "squats":
+        left = angle_deg(lm_xy(landmarks33, 23), lm_xy(landmarks33, 25), lm_xy(landmarks33, 27))
+        right = angle_deg(lm_xy(landmarks33, 24), lm_xy(landmarks33, 26), lm_xy(landmarks33, 28))
+        return float(np.nanmean([left, right]))
+    if action == "pushups":
+        left = angle_deg(lm_xy(landmarks33, 11), lm_xy(landmarks33, 13), lm_xy(landmarks33, 15))
+        right = angle_deg(lm_xy(landmarks33, 12), lm_xy(landmarks33, 14), lm_xy(landmarks33, 16))
+        return float(np.nanmean([left, right]))
+    if action == "lunges":
+        left = angle_deg(lm_xy(landmarks33, 23), lm_xy(landmarks33, 25), lm_xy(landmarks33, 27))
+        right = angle_deg(lm_xy(landmarks33, 24), lm_xy(landmarks33, 26), lm_xy(landmarks33, 28))
+        return float(np.nanmin([left, right]))
+    if action == "situps":
+        left = angle_deg(lm_xy(landmarks33, 11), lm_xy(landmarks33, 23), lm_xy(landmarks33, 25))
+        right = angle_deg(lm_xy(landmarks33, 12), lm_xy(landmarks33, 24), lm_xy(landmarks33, 26))
+        return float(np.nanmean([left, right]))
+    return float("nan")
+
+
 def classify_from_window(
     clf,
     window_coords: np.ndarray,
@@ -192,47 +288,72 @@ def draw_prediction_overlay(
     prob: Optional[np.ndarray],
     class_names: List[str],
     target_box=None,
+    fps_value: Optional[float] = None,
+    rep_count: Optional[int] = None,
+    rep_phase: Optional[str] = None,
 ) -> None:
+    def draw_text(
+        text: str,
+        org: Tuple[int, int],
+        color: Tuple[int, int, int],
+        scale: float = 0.65,
+        thickness: int = 2,
+    ) -> None:
+        # Dark outline keeps text readable over bright backgrounds.
+        cv2.putText(
+            frame_bgr,
+            text,
+            org,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            scale,
+            (0, 0, 0),
+            thickness + 2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame_bgr,
+            text,
+            org,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            scale,
+            color,
+            thickness,
+            cv2.LINE_AA,
+        )
+
     if target_box is not None:
         x1, y1, x2, y2, _, _ = target_box
         cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 120, 255), 2)
-        cv2.putText(
-            frame_bgr,
-            "TARGET",
-            (x1, max(20, y1 - 10)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 120, 255),
-            2,
-            cv2.LINE_AA,
-        )
+        draw_text("TARGET", (x1, max(24, y1 - 10)), (0, 180, 255), scale=0.7, thickness=2)
+
+    # Build lines first so panel can auto-size and avoid overlaps.
+    lines: List[Tuple[str, Tuple[int, int, int], float, int]] = []
     if pred_label:
-        cv2.putText(
-            frame_bgr,
-            f"Pred: {pred_label}",
-            (20, 35),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.0,
-            (40, 255, 40),
-            2,
-            cv2.LINE_AA,
-        )
+        lines.append((f"Pred: {pred_label}", (40, 255, 40), 0.9, 2))
     if prob is not None:
         top = np.argsort(-prob)[:3]
-        y = 70
         for i in top:
             txt = f"{class_names[int(i)]}: {prob[int(i)]:.2f}"
-            cv2.putText(
-                frame_bgr,
-                txt,
-                (20, y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            y += 28
+            lines.append((txt, (240, 240, 240), 0.66, 2))
+    if fps_value is not None:
+        lines.append((f"FPS: {fps_value:.1f}", (0, 220, 255), 0.72, 2))
+    if rep_count is not None:
+        lines.append((f"Count: {rep_count}", (80, 255, 255), 0.72, 2))
+    if rep_phase:
+        lines.append((f"Phase: {rep_phase}", (255, 210, 80), 0.72, 2))
+
+    if lines:
+        x, y = 16, 16
+        line_h = 28
+        panel_w = 360
+        panel_h = 16 + len(lines) * line_h + 8
+        overlay = frame_bgr.copy()
+        cv2.rectangle(overlay, (x, y), (x + panel_w, y + panel_h), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.55, frame_bgr, 0.45, 0, frame_bgr)
+        text_y = y + 26
+        for text, color, scale, thickness in lines:
+            draw_text(text, (x + 12, text_y), color, scale=scale, thickness=thickness)
+            text_y += line_h
 
 
 def run_video_mode(
@@ -245,6 +366,8 @@ def run_video_mode(
     window_size: int,
     classify_every: int,
     num_poses: int,
+    count_conf: float,
+    count_log: Optional[str],
 ) -> None:
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -285,6 +408,9 @@ def run_video_mode(
     pred_label = ""
     pred_prob: Optional[np.ndarray] = None
     prev_center = None
+    prev_tick = time.perf_counter()
+    fps_ema = 0.0
+    rep_counter = RepCounterFSM()
 
     with mp_tasks_vision.PoseLandmarker.create_from_options(options) as landmarker:
         frame = first_frame
@@ -309,7 +435,33 @@ def run_video_mode(
                 win = np.asarray(history, dtype=np.float32)
                 pred_label, pred_prob = classify_from_window(clf, win, class_names)
 
-            draw_prediction_overlay(frame, pred_label, pred_prob, class_names, target_box=target_box)
+            rep_count = None
+            rep_phase = None
+            if target_landmarks is not None and pred_label in COUNT_RULES:
+                conf_ok = True
+                if pred_prob is not None:
+                    conf_ok = float(np.max(pred_prob)) >= count_conf
+                if conf_ok:
+                    metric = action_metric(pred_label, target_landmarks)
+                    rep_counter.update(pred_label, metric, frame_idx)
+                rep_count = rep_counter.counts.get(pred_label, 0)
+                rep_phase = rep_counter.current_phase(pred_label)
+
+            now_tick = time.perf_counter()
+            dt = max(1e-6, now_tick - prev_tick)
+            inst_fps = 1.0 / dt
+            fps_ema = inst_fps if fps_ema == 0.0 else (0.9 * fps_ema + 0.1 * inst_fps)
+            prev_tick = now_tick
+            draw_prediction_overlay(
+                frame,
+                pred_label,
+                pred_prob,
+                class_names,
+                target_box=target_box,
+                fps_value=fps_ema,
+                rep_count=rep_count,
+                rep_phase=rep_phase,
+            )
 
             if writer is not None:
                 writer.write(frame)
@@ -330,6 +482,18 @@ def run_video_mode(
         print(f"[OK] Saved output video to: {output_path}")
     if display:
         cv2.destroyAllWindows()
+
+    print("[COUNT] Repetition summary:", rep_counter.counts)
+    if count_log:
+        ensure_parent_dir(count_log)
+        with open(count_log, "w", encoding="utf-8") as f:
+            json.dump(
+                {"counts": rep_counter.counts, "segments": rep_counter.segments},
+                f,
+                ensure_ascii=True,
+                indent=2,
+            )
+        print(f"[OK] Saved counting log to: {count_log}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -360,6 +524,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=4,
         help="Maximum number of persons to detect before target selection.",
     )
+    p.add_argument(
+        "--count_conf",
+        type=float,
+        default=0.55,
+        help="Minimum classification confidence required to update repetition counter.",
+    )
+    p.add_argument(
+        "--count_log",
+        default=None,
+        help="Optional output path for counting summary JSON.",
+    )
     return p
 
 
@@ -388,6 +563,8 @@ def main() -> None:
         window_size=window_size,
         classify_every=max(1, args.classify_every),
         num_poses=max(1, args.num_poses),
+        count_conf=max(0.0, min(1.0, args.count_conf)),
+        count_log=args.count_log,
     )
 
 

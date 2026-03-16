@@ -69,3 +69,29 @@ This demo keeps MediaPipe PoseLandmarker visualization and adds 4-action classif
 ```bash
 python demo_pose_with_classification.py --input push_up_test.mp4 --output push_up_cls_result.mp4 --task_model pose_landmarker.task --model_path artifacts\mmfit_action_cls\rf_mmfit_4actions.joblib --meta_path artifacts\mmfit_action_cls\meta.json
 ```
+
+This demo now includes repetition counting (threshold + state machine) for:
+- `squats`
+- `pushups`
+- `lunges`
+- `situps`
+
+You can also export counting summary:
+
+```bash
+python demo_pose_with_classification.py --input input\pushup_test.mp4 --output output\pushup_cls_count.mp4 --task_model pose_landmarker_full.task --model_path artifacts\mmfit_action_cls\rf_mmfit_4actions.joblib --meta_path artifacts\mmfit_action_cls\meta.json --count_log output\pushup_count.json
+```
+
+## One-Click Model Benchmark (FPS/Time/Drop)
+
+Compare three MediaPipe task models on the same video:
+
+```bash
+python benchmark_pose_models.py --input push_up_test.mp4 --models lite=pose_landmarker_lite.task full=pose_landmarker_full.task heavy=pose_landmarker_heavy.task
+```
+
+Output table includes:
+- `fps`: end-to-end processing FPS
+- `elapsed_s`: total processing time
+- `avg_infer_ms`: average model inference time per frame
+- `dropped_frames` / `drop_rate`: frames without detected pose

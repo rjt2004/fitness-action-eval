@@ -1,0 +1,14 @@
+{
+  "counts": {
+    "squats": 0,
+    "pushups": 0,
+    "lunges": 0,
+    "situps": 0
+  },
+  "segments": {
+    "squats": [],
+    "pushups": [],
+    "lunges": [],
+    "situps": []
+  }
+}
