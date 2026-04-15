@@ -3,8 +3,8 @@ import argparse
 from fitness_action_eval.pipeline import run_dtw_scoring_from_template
 
 
-FIXED_SCORE_SCALE = 6.0
-FIXED_HINT_THRESHOLD = 0.22
+SCORE_SCALE = 6.0
+HINT_THRESHOLD = 0.22
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -27,8 +27,8 @@ def main() -> None:
         out_plot=args.out_plot,
         out_video=args.out_video,
         preview=bool(args.preview),
-        score_scale=FIXED_SCORE_SCALE,
-        hint_threshold=FIXED_HINT_THRESHOLD,
+        score_scale=SCORE_SCALE,
+        hint_threshold=HINT_THRESHOLD,
     )
     print("[OK] template:", summary["template_path"])
     print("[OK] coaching video:", args.out_video)
