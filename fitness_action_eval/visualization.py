@@ -184,8 +184,11 @@ def compose_compare_frame(
     current_local_err: float,
     active_hint: str,
     align_info: Optional[Dict[str, int]],
+    phase_name: str = "",
+    phase_cue: str = "",
+    max_panel_height: int = 720,
 ) -> np.ndarray:
-    target_height = max(ref_frame.shape[0], qry_frame.shape[0])
+    target_height = min(max(ref_frame.shape[0], qry_frame.shape[0]), max_panel_height)
     ref_view = resize_to_height(ref_frame, target_height)
     qry_view = resize_to_height(qry_frame, target_height)
     target_width = max(ref_view.shape[1], qry_view.shape[1])
@@ -201,6 +204,10 @@ def compose_compare_frame(
     lines = [f"最终得分：{score:.1f}/100"]
     if np.isfinite(current_local_err):
         lines.append(f"局部偏差：{current_local_err:.3f}")
+    if phase_name:
+        lines.append(f"当前动作：{phase_name}")
+    if phase_cue:
+        lines.append(f"动作要领：{phase_cue}")
     if active_hint:
         lines.append(f"实时提示：{active_hint}")
     if align_info is not None:
@@ -291,6 +298,8 @@ def render_feedback_video(
     frame_pose_map: Dict[int, np.ndarray],
     ref_pose_map: Optional[Dict[int, np.ndarray]] = None,
     alignment_map: Optional[Dict[int, Dict[str, int]]] = None,
+    frame_phase_map: Optional[Dict[int, str]] = None,
+    frame_cue_map: Optional[Dict[int, str]] = None,
     preview: bool = False,
 ) -> None:
     cap = cv2.VideoCapture(query_video)
@@ -321,6 +330,8 @@ def render_feedback_video(
     current_align_info: Optional[Dict[str, int]] = None
     current_ref_frame_idx = -1
     current_ref_frame: Optional[np.ndarray] = None
+    current_phase_name = ""
+    current_phase_cue = ""
 
     while True:
         ok, query_frame = cap.read()
@@ -332,6 +343,10 @@ def render_feedback_video(
             active_hint_left = keep_frames
         if frame_idx in frame_error_map:
             current_local_err = frame_error_map[frame_idx]
+        if frame_phase_map is not None and frame_idx in frame_phase_map:
+            current_phase_name = frame_phase_map[frame_idx]
+        if frame_cue_map is not None and frame_idx in frame_cue_map:
+            current_phase_cue = frame_cue_map[frame_idx]
 
         query_view = query_frame.copy()
         if frame_idx in frame_pose_map:
@@ -368,11 +383,17 @@ def render_feedback_video(
                 current_local_err=current_local_err,
                 active_hint=hint_text,
                 align_info=current_align_info,
+                phase_name=current_phase_name,
+                phase_cue=current_phase_cue,
             )
         else:
             lines = [f"最终得分：{score:.1f}/100"]
             if np.isfinite(current_local_err):
                 lines.append(f"局部偏差：{current_local_err:.3f}")
+            if current_phase_name:
+                lines.append(f"当前动作：{current_phase_name}")
+            if current_phase_cue:
+                lines.append(f"动作要领：{current_phase_cue}")
             if hint_text:
                 lines.append(f"实时提示：{hint_text}")
             draw_text_block(query_view, lines, x=20, y=18)

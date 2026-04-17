@@ -1,4 +1,7 @@
-from typing import Any, Dict, List, Optional, Tuple
+from __future__ import annotations
+
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import cv2
 import mediapipe as mp
@@ -6,6 +9,7 @@ import numpy as np
 from mediapipe.tasks import python as mp_tasks_python
 from mediapipe.tasks.python import vision as mp_tasks_vision
 
+from fitness_action_eval.baduanjin import compute_joint_angle_sequence
 from fitness_action_eval.visualization import close_preview_windows, draw_pose_skeleton, draw_text_block, preview_frame
 
 
@@ -14,7 +18,7 @@ def moving_average_matrix(x: np.ndarray, k: int) -> np.ndarray:
     if x.ndim != 2:
         raise ValueError("moving_average_matrix expects shape (T, D).")
     if k <= 1 or x.shape[0] < k:
-        return x
+        return x.astype(np.float32)
     if k % 2 == 0:
         k += 1
     pad = k // 2
@@ -26,13 +30,13 @@ def moving_average_matrix(x: np.ndarray, k: int) -> np.ndarray:
     return out
 
 
-def normalize_matrix(x: np.ndarray) -> np.ndarray:
+def normalize_matrix(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     # 对每一维特征做标准化，使不同关键点维度具有可比性。
     if x.ndim != 2:
         raise ValueError("normalize_matrix expects shape (T, D).")
-    mu = np.mean(x, axis=0, keepdims=True)
-    std = np.std(x, axis=0, keepdims=True) + 1e-6
-    return (x - mu) / std
+    mu = np.mean(x, axis=0, keepdims=True).astype(np.float32)
+    std = (np.std(x, axis=0, keepdims=True) + 1e-6).astype(np.float32)
+    return ((x - mu) / std).astype(np.float32), mu, std
 
 
 def pose_bbox(
@@ -98,11 +102,90 @@ def normalize_pose_points(points: np.ndarray) -> Optional[np.ndarray]:
     return norm.astype(np.float32)
 
 
+def create_pose_landmarker(
+    task_model: str,
+    num_poses: int,
+    running_mode: mp_tasks_vision.RunningMode = mp_tasks_vision.RunningMode.VIDEO,
+) -> mp_tasks_vision.PoseLandmarker:
+    options = mp_tasks_vision.PoseLandmarkerOptions(
+        base_options=mp_tasks_python.BaseOptions(model_asset_path=task_model),
+        running_mode=running_mode,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+        num_poses=max(1, num_poses),
+    )
+    return mp_tasks_vision.PoseLandmarker.create_from_options(options)
+
+
+def detect_pose_in_frame(
+    landmarker: mp_tasks_vision.PoseLandmarker,
+    frame: np.ndarray,
+    timestamp_ms: int,
+    prev_center: Optional[Tuple[float, float]],
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[Tuple[float, float]]]:
+    height, width = frame.shape[:2]
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    result = landmarker.detect_for_video(mp_image, int(timestamp_ms))
+    target, prev_center = select_target_pose(result.pose_landmarks, width=width, height=height, prev_center=prev_center)
+    if target is None or len(target) < 33:
+        return None, None, prev_center
+
+    pts = np.array([[lm.x, lm.y] for lm in target[:33]], dtype=np.float32)
+    if not np.all(np.isfinite(pts)):
+        return None, None, prev_center
+
+    norm = normalize_pose_points(pts)
+    if norm is None or not np.all(np.isfinite(norm)):
+        return None, None, prev_center
+    return norm, pts, prev_center
+
+
+def build_pose_feature_bundle(points: np.ndarray) -> Dict[str, np.ndarray]:
+    flat_points = points.reshape(points.shape[0], -1).astype(np.float32)
+    angle_features = compute_joint_angle_sequence(points)
+    combined_raw = np.concatenate([flat_points, angle_features], axis=1).astype(np.float32)
+    base_features, feature_mean, feature_std = normalize_matrix(combined_raw)
+    return {
+        "flat_points": flat_points,
+        "angle_features": angle_features,
+        "combined_features_raw": combined_raw,
+        "base_features": base_features,
+        "feature_mean": feature_mean,
+        "feature_std": feature_std,
+    }
+
+
+def build_current_feature(
+    recent_points: Deque[np.ndarray],
+    smooth_window: int,
+    feature_mean: Optional[np.ndarray] = None,
+    feature_std: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if not recent_points:
+        raise ValueError("recent_points must contain at least one pose.")
+
+    points_arr = np.asarray(list(recent_points), dtype=np.float32)
+    flat_points = points_arr.reshape(points_arr.shape[0], -1)
+    smoothed = moving_average_matrix(flat_points, max(1, min(smooth_window, points_arr.shape[0])))
+    current_points = smoothed[-1].reshape(33, 2).astype(np.float32)
+    angle_features = compute_joint_angle_sequence(current_points[None, :, :])[0]
+    raw_feature = np.concatenate([current_points.reshape(-1), angle_features], axis=0).astype(np.float32)
+
+    if feature_mean is not None and feature_std is not None:
+        normalized = ((raw_feature[None, :] - feature_mean) / feature_std)[0].astype(np.float32)
+    else:
+        normalized = raw_feature
+    return current_points, raw_feature, normalized, angle_features
+
+
 def extract_pose_sequence(
     video_path: str,
     task_model: str,
     num_poses: int,
     smooth_window: int,
+    frame_stride: int = 1,
     preview: bool = False,
     preview_title: str = "Pose Preview",
 ) -> Dict[str, Any]:
@@ -120,51 +203,40 @@ def extract_pose_sequence(
         cap.release()
         raise RuntimeError(f"Cannot read first frame from: {video_path}")
 
-    height, width = first.shape[:2]
-    options = mp_tasks_vision.PoseLandmarkerOptions(
-        base_options=mp_tasks_python.BaseOptions(model_asset_path=task_model),
-        running_mode=mp_tasks_vision.RunningMode.VIDEO,
-        min_pose_detection_confidence=0.5,
-        min_pose_presence_confidence=0.5,
-        min_tracking_confidence=0.5,
-        num_poses=max(1, num_poses),
-    )
-
     points_seq: List[np.ndarray] = []
     raw_points_seq: List[np.ndarray] = []
     frame_indices: List[int] = []
     time_s: List[float] = []
     prev_center = None
     frame_idx = 0
+    frame_stride = max(1, int(frame_stride))
 
-    with mp_tasks_vision.PoseLandmarker.create_from_options(options) as landmarker:
+    with create_pose_landmarker(task_model=task_model, num_poses=num_poses) as landmarker:
         frame = first
         while True:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            timestamp_ms = int((frame_idx * 1000.0) / fps)
-            result = landmarker.detect_for_video(mp_image, timestamp_ms)
-            target, prev_center = select_target_pose(
-                result.pose_landmarks, width=width, height=height, prev_center=prev_center
-            )
-
             preview_frame_img = frame.copy()
-            if target is not None and len(target) >= 33:
-                # 同时保留原始坐标与归一化坐标，分别用于渲染和评分。
-                pts = np.array([[lm.x, lm.y] for lm in target[:33]], dtype=np.float32)
-                if np.all(np.isfinite(pts)):
-                    norm = normalize_pose_points(pts)
-                    if norm is not None and np.all(np.isfinite(norm)):
-                        points_seq.append(norm)
-                        raw_points_seq.append(pts.copy())
-                        frame_indices.append(frame_idx)
-                        time_s.append(float(frame_idx / fps))
-                        if preview:
-                            draw_pose_skeleton(preview_frame_img, pts)
+            should_process = (frame_idx % frame_stride) == 0
+            if should_process:
+                timestamp_ms = int((frame_idx * 1000.0) / fps)
+                norm_pts, raw_pts, prev_center = detect_pose_in_frame(
+                    landmarker=landmarker,
+                    frame=frame,
+                    timestamp_ms=timestamp_ms,
+                    prev_center=prev_center,
+                )
+                if norm_pts is not None and raw_pts is not None:
+                    points_seq.append(norm_pts)
+                    raw_points_seq.append(raw_pts)
+                    frame_indices.append(frame_idx)
+                    time_s.append(float(frame_idx / fps))
+                    if preview:
+                        draw_pose_skeleton(preview_frame_img, raw_pts)
+
             if preview:
                 lines = [
                     f"Frame: {frame_idx}",
-                    f"Valid Poses: {len(points_seq)}",
+                    f"Valid poses: {len(points_seq)}",
+                    f"Stride: {frame_stride}",
                     f"Video: {video_path}",
                 ]
                 draw_text_block(preview_frame_img, lines, x=20, y=18)
@@ -188,14 +260,21 @@ def extract_pose_sequence(
     points = np.asarray(points_seq, dtype=np.float32)
     flat = points.reshape(points.shape[0], -1)
     flat_smooth = moving_average_matrix(flat, max(1, smooth_window))
-    points_smooth = flat_smooth.reshape((-1, 33, 2))
-    features = normalize_matrix(flat_smooth)
+    points_smooth = flat_smooth.reshape((-1, 33, 2)).astype(np.float32)
+    feature_bundle = build_pose_feature_bundle(points_smooth)
 
     return {
-        "features": features,
+        "features": feature_bundle["base_features"],
+        "base_features": feature_bundle["base_features"],
+        "flat_points": feature_bundle["flat_points"],
+        "angle_features": feature_bundle["angle_features"],
+        "combined_features_raw": feature_bundle["combined_features_raw"],
+        "feature_mean": feature_bundle["feature_mean"],
+        "feature_std": feature_bundle["feature_std"],
         "points": points_smooth,
         "raw_points": np.asarray(raw_points_seq, dtype=np.float32),
         "frame_indices": np.asarray(frame_indices, dtype=np.int32),
         "time_s": np.asarray(time_s, dtype=np.float32),
         "fps": float(fps),
+        "frame_stride": int(frame_stride),
     }
