@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from collections import deque
-from typing import Any, Deque, Dict, Optional, Union
+from typing import Any, Callable, Deque, Dict, Optional, Union
 
 import cv2
 import numpy as np
@@ -32,6 +32,7 @@ from fitness_action_eval.visualization import (
     get_aligned_reference_frame,
     preview_frame,
     render_feedback_video,
+    save_phase_plots,
     save_plot,
 )
 
@@ -220,6 +221,15 @@ def finalize_scoring_outputs(
         hint["ref_time_s"] = float(ref_data["time_s"][int(hint["ref_index"])])
 
     ensure_parent_dir(out_json)
+    phase_plot_dir = os.path.join(os.path.dirname(os.path.abspath(out_plot)), "phase_plots")
+    phase_plots = save_phase_plots(
+        ref_data=ref_data,
+        qry_data=qry_data,
+        path=path,
+        hints=hints,
+        out_dir=phase_plot_dir,
+        score_scale=score_scale,
+    )
     result = {
         "mode": "baduanjin_pose_dtw_weighted",
         "reference_video": ref_video,
@@ -240,6 +250,7 @@ def finalize_scoring_outputs(
         "hint_count": int(len(hints)),
         "reference_phases": ref_data["phase_rows"],
         "query_phases": qry_data["phase_rows"],
+        "phase_plots": phase_plots,
         "hints": hints,
     }
     with open(out_json, "w", encoding="utf-8") as f:
@@ -472,6 +483,7 @@ def run_camera_coach(
     out_video: Optional[str] = None,
     preview: bool = True,
     max_frames: Optional[int] = None,
+    stop_checker: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     ref_data = _load_or_prepare_reference(
         template_path=template_path,
@@ -521,6 +533,8 @@ def run_camera_coach(
 
     with create_pose_landmarker(task_model=ref_data["task_model"], num_poses=ref_data["num_poses"]) as landmarker:
         while True:
+            if stop_checker is not None and stop_checker():
+                break
             if max_frames is not None and frame_idx >= max_frames:
                 break
             ok, frame = cap.read()

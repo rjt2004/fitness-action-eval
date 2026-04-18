@@ -267,6 +267,110 @@ def save_plot(
     plt.close()
 
 
+def save_phase_plots(
+    ref_data: Dict[str, np.ndarray],
+    qry_data: Dict[str, np.ndarray],
+    path: List[Tuple[int, int]],
+    hints: List[Dict[str, object]],
+    out_dir: str,
+    score_scale: float,
+) -> List[Dict[str, object]]:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        print(f"[WARN] Skip phase plot export because matplotlib is unavailable: {exc}")
+        return []
+
+    from fitness_action_eval.dtw import distance_to_score
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    ref_proxy = np.linalg.norm(ref_data["points"].reshape(ref_data["points"].shape[0], -1), axis=1)
+    qry_proxy = np.linalg.norm(qry_data["points"].reshape(qry_data["points"].shape[0], -1), axis=1)
+
+    ref_phase_rows = {int(row["phase_id"]): row for row in ref_data["phase_rows"]}
+    qry_phase_rows = {int(row["phase_id"]): row for row in qry_data["phase_rows"]}
+    phase_hints: Dict[int, List[Dict[str, object]]] = {}
+    for hint in hints:
+        phase_id = int(hint.get("phase_id", -1))
+        phase_hints.setdefault(phase_id, []).append(hint)
+
+    phase_plot_rows: List[Dict[str, object]] = []
+    for phase_id in sorted(set(ref_phase_rows) & set(qry_phase_rows)):
+        ref_row = ref_phase_rows[phase_id]
+        qry_row = qry_phase_rows[phase_id]
+        ref_start = int(ref_row["start_seq_idx"])
+        ref_end = int(ref_row["end_seq_idx"])
+        qry_start = int(qry_row["start_seq_idx"])
+        qry_end = int(qry_row["end_seq_idx"])
+        phase_path = [(ref_idx, qry_idx) for ref_idx, qry_idx in path if ref_start <= ref_idx <= ref_end and qry_start <= qry_idx <= qry_end]
+        if not phase_path:
+            continue
+
+        ref_zero = float(ref_data["time_s"][ref_start])
+        qry_zero = float(qry_data["time_s"][qry_start])
+        local_distances = [
+            float(np.linalg.norm(ref_data["features"][ref_idx] - qry_data["features"][qry_idx]))
+            for ref_idx, qry_idx in phase_path
+        ]
+        local_norm_dist = float(np.mean(local_distances))
+        local_score = float(distance_to_score(local_norm_dist, score_scale))
+
+        output_path = os.path.join(out_dir, f"phase_{phase_id:02d}.png")
+        plt.figure(figsize=(8.4, 4.8))
+        plt.plot(
+            ref_data["time_s"][ref_start : ref_end + 1] - ref_zero,
+            ref_proxy[ref_start : ref_end + 1],
+            label="Reference",
+            linewidth=2,
+        )
+        plt.plot(
+            qry_data["time_s"][qry_start : qry_end + 1] - qry_zero,
+            qry_proxy[qry_start : qry_end + 1],
+            label="Query",
+            linewidth=2,
+        )
+
+        step = max(1, len(phase_path) // 45)
+        for ref_idx, qry_idx in phase_path[::step]:
+            plt.plot(
+                [
+                    float(ref_data["time_s"][ref_idx] - ref_zero),
+                    float(qry_data["time_s"][qry_idx] - qry_zero),
+                ],
+                [float(ref_proxy[ref_idx]), float(qry_proxy[qry_idx])],
+                color="gray",
+                alpha=0.14,
+                linewidth=0.8,
+            )
+
+        for hint in phase_hints.get(phase_id, [])[:6]:
+            query_time_s = float(hint.get("query_time_s", 0.0)) - qry_zero
+            plt.axvline(x=query_time_s, color="orange", alpha=0.18, linewidth=1)
+
+        plt.title(f"{qry_row['phase_name']} | score={local_score:.1f} | norm_dist={local_norm_dist:.4f}")
+        plt.xlabel("Local Time (s)")
+        plt.ylabel("Pose Feature Norm")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150)
+        plt.close()
+
+        phase_plot_rows.append(
+            {
+                "phase_id": phase_id,
+                "phase_name": str(qry_row["phase_name"]),
+                "cue": str(qry_row.get("cue", "")),
+                "image_path": output_path,
+                "score": round(local_score, 2),
+                "normalized_distance": round(local_norm_dist, 4),
+                "alignment_points": len(phase_path),
+            }
+        )
+
+    return phase_plot_rows
+
+
 def get_aligned_reference_frame(
     ref_cap: Optional[cv2.VideoCapture],
     target_ref_frame: int,

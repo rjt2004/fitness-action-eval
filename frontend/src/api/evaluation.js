@@ -1,0 +1,23 @@
+import request from "@/utils/request";
+
+export function getEvaluationTasks() {
+  return request.get("/api/evaluation-center/tasks/");
+}
+
+export function createEvaluationTask(formData) {
+  return request.post("/api/evaluation-center/tasks/create/", formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+}
+
+export function getEvaluationTaskDetail(id) {
+  return request.get(`/api/evaluation-center/tasks/${id}/`);
+}
+
+export function getEvaluationTaskPhases(id) {
+  return request.get(`/api/evaluation-center/tasks/${id}/phases/`);
+}
+
+export function getEvaluationTaskHints(id) {
+  return request.get(`/api/evaluation-center/tasks/${id}/hints/`);
+}
