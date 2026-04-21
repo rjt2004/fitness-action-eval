@@ -1,19 +1,29 @@
 <script setup>
 import { onMounted, ref } from "vue";
-import { getLiveSessionDetail, getLiveSessions } from "@/api/liveSession";
-import VideoPlayer from "@/components/VideoPlayer.vue";
+import { useRouter } from "vue-router";
+import { ElMessage, ElMessageBox } from "element-plus";
+import { deleteLiveSession, getLiveSessions } from "@/api/liveSession";
 
+const router = useRouter();
 const loading = ref(false);
 const tableData = ref([]);
-const drawerVisible = ref(false);
-const currentDetail = ref(null);
 
 function statusLabel(status) {
   if (status === "success") return "运行完成";
   if (status === "failed") return "运行失败";
   if (status === "stopped") return "已停止";
+  if (status === "paused") return "已暂停";
   if (status === "running") return "运行中";
   return "待启动";
+}
+
+function statusType(status) {
+  if (status === "success") return "success";
+  if (status === "failed") return "danger";
+  if (status === "stopped") return "info";
+  if (status === "paused") return "warning";
+  if (status === "running") return "warning";
+  return "info";
 }
 
 async function loadData() {
@@ -25,9 +35,17 @@ async function loadData() {
   }
 }
 
-async function handleView(row) {
-  currentDetail.value = await getLiveSessionDetail(row.id);
-  drawerVisible.value = true;
+function handleView(row) {
+  router.push({ name: "live-detail", params: { id: row.id } });
+}
+
+async function handleDelete(row) {
+  await ElMessageBox.confirm(`确认删除实时会话“${row.session_name || row.session_no}”吗？`, "删除确认", {
+    type: "warning",
+  });
+  await deleteLiveSession(row.id);
+  ElMessage.success("实时会话已删除");
+  await loadData();
 }
 
 onMounted(loadData);
@@ -43,50 +61,24 @@ onMounted(loadData);
         <el-table-column prop="session_name" label="会话名称" min-width="180" />
         <el-table-column label="状态" width="120">
           <template #default="{ row }">
-            {{ statusLabel(row.status) }}
+            <el-tag :type="statusType(row.status)" effect="light">
+              {{ statusLabel(row.status) }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="avg_score" label="平均分" width="100" />
-        <el-table-column prop="matched_frames" label="匹配帧数" width="120" />
+        <el-table-column prop="hint_count" label="提示数" width="100" />
         <el-table-column prop="created_at" label="创建时间" min-width="180" />
-        <el-table-column label="操作" width="120">
+        <el-table-column label="操作" min-width="180">
           <template #default="{ row }">
-            <el-button size="small" type="primary" @click="handleView(row)">
-              查看
-            </el-button>
+            <div class="action-row">
+              <el-button size="small" type="primary" @click="handleView(row)">查看详情</el-button>
+              <el-button size="small" type="danger" plain @click="handleDelete(row)">删除</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
     </section>
-
-    <el-drawer v-model="drawerVisible" title="会话详情" size="45%">
-      <div v-if="currentDetail" class="live-detail">
-        <el-descriptions :column="1" border>
-          <el-descriptions-item label="会话名称">
-            {{ currentDetail.session_name }}
-          </el-descriptions-item>
-          <el-descriptions-item label="状态">
-            {{ statusLabel(currentDetail.status) }}
-          </el-descriptions-item>
-          <el-descriptions-item label="平均分">
-            {{ currentDetail.avg_score }}
-          </el-descriptions-item>
-          <el-descriptions-item label="匹配帧数">
-            {{ currentDetail.matched_frames }}
-          </el-descriptions-item>
-          <el-descriptions-item label="最终动作阶段">
-            {{ currentDetail.final_phase_name || "--" }}
-          </el-descriptions-item>
-          <el-descriptions-item label="动作要领">
-            {{ currentDetail.final_phase_cue || "--" }}
-          </el-descriptions-item>
-        </el-descriptions>
-
-        <div style="margin-top: 18px">
-          <VideoPlayer :path="currentDetail.output_video_path" />
-        </div>
-      </div>
-    </el-drawer>
   </div>
 </template>
 
@@ -95,9 +87,8 @@ onMounted(loadData);
   padding: 22px;
 }
 
-.live-detail {
+.action-row {
   display: flex;
-  flex-direction: column;
-  gap: 16px;
+  gap: 8px;
 }
 </style>

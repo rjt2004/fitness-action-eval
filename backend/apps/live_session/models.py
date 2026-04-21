@@ -10,6 +10,7 @@ class LiveSession(models.Model):
     class Status(models.TextChoices):
         PENDING = "pending", "待启动"
         RUNNING = "running", "运行中"
+        PAUSED = "paused", "已暂停"
         SUCCESS = "success", "已完成"
         FAILED = "failed", "失败"
         STOPPED = "stopped", "已停止"
@@ -33,11 +34,14 @@ class LiveSession(models.Model):
     camera_height = models.PositiveIntegerField(null=True, blank=True, verbose_name="摄像头高度")
     camera_mirror = models.BooleanField(default=True, verbose_name="是否镜像")
     preview = models.BooleanField(default=False, verbose_name="是否本地预览")
-    frame_stride = models.PositiveIntegerField(default=4, verbose_name="模板抽帧步长")
+    export_video = models.BooleanField(default=False, verbose_name="是否导出视频")
+    frame_stride = models.PositiveIntegerField(default=4, verbose_name="抽帧步长")
     smooth_window = models.PositiveIntegerField(default=7, verbose_name="平滑窗口")
     score_scale = models.DecimalField(max_digits=6, decimal_places=2, default=8.00, verbose_name="评分尺度")
     hint_threshold = models.DecimalField(max_digits=6, decimal_places=3, default=0.180, verbose_name="提示阈值")
-    ref_search_window = models.PositiveIntegerField(default=90, verbose_name="模板搜索窗口")
+    hint_min_interval = models.PositiveIntegerField(default=8, verbose_name="提示最小间隔")
+    max_hints = models.PositiveIntegerField(default=40, verbose_name="提示上限")
+    ref_search_window = models.PositiveIntegerField(default=20, verbose_name="模板搜索窗口")
     max_frames = models.PositiveIntegerField(null=True, blank=True, verbose_name="最大处理帧数")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, verbose_name="状态")
     summary_json_path = models.CharField(max_length=255, blank=True, default="", verbose_name="摘要 JSON 路径")

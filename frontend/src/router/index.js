@@ -9,6 +9,7 @@ import EvaluationList from "@/views/evaluation/EvaluationList.vue";
 import EvaluationDetail from "@/views/evaluation/EvaluationDetail.vue";
 import LiveSessionPage from "@/views/live/LiveSessionPage.vue";
 import LiveSessionList from "@/views/live/LiveSessionList.vue";
+import LiveSessionDetail from "@/views/live/LiveSessionDetail.vue";
 import { useAuthStore } from "@/stores/auth";
 
 function defaultRouteByRole(role) {
@@ -69,6 +70,12 @@ const router = createRouter({
           name: "live-list",
           component: LiveSessionList,
           meta: { title: "会话记录" },
+        },
+        {
+          path: "live/:id",
+          name: "live-detail",
+          component: LiveSessionDetail,
+          meta: { title: "会话详情" },
         },
       ],
     },

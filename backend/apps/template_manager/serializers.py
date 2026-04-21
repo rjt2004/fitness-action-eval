@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
+from fitness_action_eval.baduanjin import BADUANJIN_PHASES
+
 from .models import ActionCategory, FileAsset, TemplateVideo
 
 
@@ -43,9 +45,10 @@ class TemplateVideoListSerializer(serializers.ModelSerializer):
 class TemplateVideoDetailSerializer(TemplateVideoListSerializer):
     source_video_path = serializers.SerializerMethodField()
     file_assets = serializers.SerializerMethodField()
+    phase_guides = serializers.SerializerMethodField()
 
     class Meta(TemplateVideoListSerializer.Meta):
-        fields = TemplateVideoListSerializer.Meta.fields + ("source_video_path", "file_assets")
+        fields = TemplateVideoListSerializer.Meta.fields + ("source_video_path", "file_assets", "phase_guides")
 
     def get_source_video_path(self, obj: TemplateVideo) -> str:
         return obj.source_video.url if obj.source_video else ""
@@ -56,6 +59,17 @@ class TemplateVideoDetailSerializer(TemplateVideoListSerializer):
             biz_type__in=[FileAsset.BizType.TEMPLATE_SOURCE, FileAsset.BizType.TEMPLATE_FILE],
         )
         return FileAssetSerializer(assets, many=True).data
+
+    def get_phase_guides(self, obj: TemplateVideo):
+        return [
+            {
+                "phase_id": phase.phase_id,
+                "key": phase.key,
+                "phase_name": phase.display_name,
+                "cue": phase.cue,
+            }
+            for phase in BADUANJIN_PHASES
+        ]
 
 
 class TemplateUploadSerializer(serializers.Serializer):

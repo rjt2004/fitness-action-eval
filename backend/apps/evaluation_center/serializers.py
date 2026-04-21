@@ -13,9 +13,12 @@ class EvaluationTaskCreateSerializer(serializers.Serializer):
     task_name = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
     query_video = serializers.FileField()
     score_scale = serializers.DecimalField(max_digits=6, decimal_places=2, required=False, default="8.00")
-    hint_threshold = serializers.DecimalField(max_digits=6, decimal_places=3, required=False, default="0.180")
-    hint_min_interval = serializers.IntegerField(required=False, min_value=1, default=8)
-    max_hints = serializers.IntegerField(required=False, min_value=1, default=40)
+    hint_threshold = serializers.DecimalField(max_digits=6, decimal_places=3, required=False, default="0.200")
+    hint_min_interval = serializers.IntegerField(required=False, min_value=1, default=12)
+    max_hints = serializers.IntegerField(required=False, min_value=1, default=24)
+    export_video = serializers.BooleanField(required=False, default=False)
+    frame_stride = serializers.IntegerField(required=False, min_value=1, default=6)
+    smooth_window = serializers.IntegerField(required=False, min_value=1, default=3)
 
     def validate_template_id(self, value):
         try:
@@ -23,7 +26,7 @@ class EvaluationTaskCreateSerializer(serializers.Serializer):
         except TemplateVideo.DoesNotExist as exc:
             raise serializers.ValidationError("模板不存在。") from exc
         if template.status != TemplateVideo.Status.READY or not template.template_file_path:
-            raise serializers.ValidationError("模板尚未生成完成，无法用于评估。")
+            raise serializers.ValidationError("模板尚未生成完成，暂时不能用于评估。")
         return value
 
 
@@ -42,6 +45,9 @@ class EvaluationTaskListSerializer(serializers.ModelSerializer):
             "score",
             "normalized_distance",
             "hint_count",
+            "export_video",
+            "progress_percent",
+            "progress_text",
             "created_at",
             "started_at",
             "finished_at",
@@ -71,22 +77,24 @@ class EvaluationTaskDetailSerializer(EvaluationTaskListSerializer):
             "hint_threshold",
             "hint_min_interval",
             "score_scale",
+            "frame_stride",
+            "smooth_window",
             "file_assets",
         )
 
     def get_file_assets(self, obj: EvaluationTask):
         assets = FileAsset.objects.filter(biz_id=obj.id, biz_type__startswith="evaluation_")
         return [
-          {
-              "id": item.id,
-              "biz_type": item.biz_type,
-              "file_name": item.file_name,
-              "file_path": item.file_path,
-              "file_type": item.file_type,
-              "file_size": item.file_size,
-              "created_at": item.created_at,
-          }
-          for item in assets
+            {
+                "id": item.id,
+                "biz_type": item.biz_type,
+                "file_name": item.file_name,
+                "file_path": item.file_path,
+                "file_type": item.file_type,
+                "file_size": item.file_size,
+                "created_at": item.created_at,
+            }
+            for item in assets
         ]
 
 

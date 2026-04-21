@@ -6,10 +6,9 @@ from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 
-from config.api_response import api_error, api_success
-
 from apps.accounts.models import User
 from apps.template_manager.models import FileAsset, TemplateVideo
+from config.api_response import api_error, api_success
 
 from .models import EvaluationHint, EvaluationPhaseResult, EvaluationTask
 from .serializers import (
@@ -19,7 +18,14 @@ from .serializers import (
     EvaluationTaskDetailSerializer,
     EvaluationTaskListSerializer,
 )
-from .services import generate_task_no, load_result_payload, persist_result_details, run_evaluation_task
+from .services import (
+    delete_evaluation_task,
+    generate_task_no,
+    load_result_payload,
+    repair_stale_task,
+    start_evaluation_task,
+    task_registry_status,
+)
 
 
 def _visible_tasks(user: User):
@@ -32,8 +38,13 @@ def _visible_tasks(user: User):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def evaluation_task_list_view(request):
-    tasks = _visible_tasks(request.user)
-    return api_success(data=EvaluationTaskListSerializer(tasks, many=True).data, message="获取评估任务列表成功")
+    tasks = [repair_stale_task(task) for task in _visible_tasks(request.user)]
+    payload = []
+    for task in tasks:
+        row = EvaluationTaskListSerializer(task).data
+        row["runtime"] = task_registry_status(task.id)
+        payload.append(row)
+    return api_success(data=payload, message="获取评估任务列表成功")
 
 
 @api_view(["POST"])
@@ -56,6 +67,11 @@ def evaluation_task_create_view(request):
         hint_threshold=validated.get("hint_threshold", "0.180"),
         hint_min_interval=validated.get("hint_min_interval", 8),
         max_hints=validated.get("max_hints", 40),
+        export_video=validated.get("export_video", False),
+        frame_stride=validated.get("frame_stride", 1),
+        smooth_window=validated.get("smooth_window", 5),
+        progress_percent=0,
+        progress_text="任务已创建，等待开始",
     )
 
     FileAsset.objects.update_or_create(
@@ -69,30 +85,21 @@ def evaluation_task_create_view(request):
         },
     )
 
-    try:
-        run_evaluation_task(task)
-        persist_result_details(task)
-    except Exception as exc:
-        task.refresh_from_db()
-        return api_error(
-            message="评估任务执行失败",
-            data={
-                "task_id": task.id,
-                "task_no": task.task_no,
-                "detail": str(exc),
-            },
-            status_code=500,
-        )
-
+    start_evaluation_task(task)
     task.refresh_from_db()
-    return api_success(data=EvaluationTaskDetailSerializer(task).data, message="评估任务执行成功", status_code=201)
+    payload = EvaluationTaskDetailSerializer(task).data
+    payload["runtime"] = task_registry_status(task.id)
+    payload["result_payload"] = {}
+    return api_success(data=payload, message="评估任务已启动", status_code=201)
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def evaluation_task_detail_view(request, task_id: int):
     task = get_object_or_404(_visible_tasks(request.user), id=task_id)
+    task = repair_stale_task(task)
     payload = EvaluationTaskDetailSerializer(task).data
+    payload["runtime"] = task_registry_status(task.id)
     payload["result_payload"] = load_result_payload(task)
     return api_success(data=payload, message="获取评估任务详情成功")
 
@@ -101,6 +108,7 @@ def evaluation_task_detail_view(request, task_id: int):
 @permission_classes([IsAuthenticated])
 def evaluation_task_phases_view(request, task_id: int):
     task = get_object_or_404(_visible_tasks(request.user), id=task_id)
+    task = repair_stale_task(task)
     rows = EvaluationPhaseResult.objects.filter(task=task)
     return api_success(data=EvaluationPhaseResultSerializer(rows, many=True).data, message="获取评估阶段结果成功")
 
@@ -109,5 +117,17 @@ def evaluation_task_phases_view(request, task_id: int):
 @permission_classes([IsAuthenticated])
 def evaluation_task_hints_view(request, task_id: int):
     task = get_object_or_404(_visible_tasks(request.user), id=task_id)
+    task = repair_stale_task(task)
     rows = EvaluationHint.objects.filter(task=task)
     return api_success(data=EvaluationHintSerializer(rows, many=True).data, message="获取评估提示成功")
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def evaluation_task_delete_view(request, task_id: int):
+    task = get_object_or_404(_visible_tasks(request.user), id=task_id)
+    try:
+        delete_evaluation_task(task)
+    except ValueError as exc:
+        return api_error(message=str(exc), status_code=400)
+    return api_success(data={"task_id": task_id}, message="评估任务删除成功")

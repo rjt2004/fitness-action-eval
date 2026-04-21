@@ -1,6 +1,6 @@
 import os
 from functools import lru_cache
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -71,6 +71,26 @@ def get_chinese_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
             except OSError:
                 continue
     return ImageFont.load_default()
+
+
+@lru_cache(maxsize=1)
+def get_matplotlib_font_path() -> Optional[str]:
+    for font_path in FONT_CANDIDATES:
+        if os.path.exists(font_path):
+            return font_path
+    return None
+
+
+def configure_matplotlib_chinese(plt) -> None:
+    font_path = get_matplotlib_font_path()
+    if font_path:
+        from matplotlib import font_manager
+
+        font_manager.fontManager.addfont(font_path)
+        font_name = font_manager.FontProperties(fname=font_path).get_name()
+        plt.rcParams["font.sans-serif"] = [font_name]
+        plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["axes.unicode_minus"] = False
 
 
 def draw_utf8_text(
@@ -220,6 +240,28 @@ def compose_compare_frame(
     return canvas
 
 
+def compose_live_query_frame(
+    qry_frame: np.ndarray,
+    score: float,
+    current_local_err: float,
+    active_hint: str,
+    phase_name: str = "",
+    phase_cue: str = "",
+) -> np.ndarray:
+    canvas = qry_frame.copy()
+    lines = [f"当前得分：{score:.1f}/100"]
+    if np.isfinite(current_local_err):
+        lines.append(f"局部偏差：{current_local_err:.3f}")
+    if phase_name:
+        lines.append(f"当前动作：{phase_name}")
+    if phase_cue:
+        lines.append(f"动作要领：{phase_cue}")
+    if active_hint:
+        lines.append(f"实时提示：{active_hint}")
+    draw_text_block(canvas, lines, x=20, y=18)
+    return canvas
+
+
 def save_plot(
     ref_data: Dict[str, np.ndarray],
     qry_data: Dict[str, np.ndarray],
@@ -234,6 +276,7 @@ def save_plot(
     except Exception as exc:
         print(f"[WARN] Skip plot export because matplotlib is unavailable: {exc}")
         return
+    configure_matplotlib_chinese(plt)
 
     ensure_parent_dir(out_png)
     ref_proxy = np.linalg.norm(ref_data["points"].reshape(ref_data["points"].shape[0], -1), axis=1)
@@ -280,6 +323,7 @@ def save_phase_plots(
     except Exception as exc:
         print(f"[WARN] Skip phase plot export because matplotlib is unavailable: {exc}")
         return []
+    configure_matplotlib_chinese(plt)
 
     from fitness_action_eval.dtw import distance_to_score
 
@@ -287,7 +331,6 @@ def save_phase_plots(
 
     ref_proxy = np.linalg.norm(ref_data["points"].reshape(ref_data["points"].shape[0], -1), axis=1)
     qry_proxy = np.linalg.norm(qry_data["points"].reshape(qry_data["points"].shape[0], -1), axis=1)
-
     ref_phase_rows = {int(row["phase_id"]): row for row in ref_data["phase_rows"]}
     qry_phase_rows = {int(row["phase_id"]): row for row in qry_data["phase_rows"]}
     phase_hints: Dict[int, List[Dict[str, object]]] = {}
@@ -303,58 +346,99 @@ def save_phase_plots(
         ref_end = int(ref_row["end_seq_idx"])
         qry_start = int(qry_row["start_seq_idx"])
         qry_end = int(qry_row["end_seq_idx"])
-        phase_path = [(ref_idx, qry_idx) for ref_idx, qry_idx in path if ref_start <= ref_idx <= ref_end and qry_start <= qry_idx <= qry_end]
+        phase_path = [
+            (ref_idx, qry_idx)
+            for ref_idx, qry_idx in path
+            if ref_start <= ref_idx <= ref_end and qry_start <= qry_idx <= qry_end
+        ]
         if not phase_path:
             continue
 
         ref_zero = float(ref_data["time_s"][ref_start])
         qry_zero = float(qry_data["time_s"][qry_start])
+        ref_phase_times = ref_data["time_s"][ref_start : ref_end + 1] - ref_zero
+        qry_phase_times = qry_data["time_s"][qry_start : qry_end + 1] - qry_zero
+        phase_times = [float(qry_data["time_s"][qry_idx] - qry_zero) for _, qry_idx in phase_path]
         local_distances = [
             float(np.linalg.norm(ref_data["features"][ref_idx] - qry_data["features"][qry_idx]))
             for ref_idx, qry_idx in phase_path
         ]
         local_norm_dist = float(np.mean(local_distances))
         local_score = float(distance_to_score(local_norm_dist, score_scale))
+        peak_idx = int(np.argmax(local_distances))
+        peak_time = phase_times[peak_idx]
+        peak_error = local_distances[peak_idx]
 
         output_path = os.path.join(out_dir, f"phase_{phase_id:02d}.png")
-        plt.figure(figsize=(8.4, 4.8))
-        plt.plot(
-            ref_data["time_s"][ref_start : ref_end + 1] - ref_zero,
-            ref_proxy[ref_start : ref_end + 1],
-            label="Reference",
-            linewidth=2,
-        )
-        plt.plot(
-            qry_data["time_s"][qry_start : qry_end + 1] - qry_zero,
-            qry_proxy[qry_start : qry_end + 1],
-            label="Query",
-            linewidth=2,
+        fig, (ax_top, ax_bottom) = plt.subplots(
+            2,
+            1,
+            figsize=(8.4, 5.6),
+            sharex=False,
+            gridspec_kw={"height_ratios": [1.1, 1.0]},
         )
 
-        step = max(1, len(phase_path) // 45)
-        for ref_idx, qry_idx in phase_path[::step]:
-            plt.plot(
-                [
-                    float(ref_data["time_s"][ref_idx] - ref_zero),
-                    float(qry_data["time_s"][qry_idx] - qry_zero),
-                ],
-                [float(ref_proxy[ref_idx]), float(qry_proxy[qry_idx])],
-                color="gray",
-                alpha=0.14,
-                linewidth=0.8,
+        ax_top.plot(
+            ref_phase_times,
+            ref_proxy[ref_start : ref_end + 1],
+            label="标准模板",
+            color="#2563eb",
+            linewidth=2,
+        )
+        ax_top.plot(
+            qry_phase_times,
+            qry_proxy[qry_start : qry_end + 1],
+            label="测试动作",
+            color="#16a34a",
+            linewidth=2,
+        )
+        ax_top.set_title(f"{qry_row['phase_name']} | 分数={local_score:.1f} | 平均误差={local_norm_dist:.4f}")
+        ax_top.set_ylabel("姿态代理值")
+        ax_top.grid(alpha=0.18, linestyle="--")
+        ax_top.legend(loc="upper right")
+
+        ax_bottom.plot(
+            phase_times,
+            local_distances,
+            label="局部对齐误差",
+            color="#dc2626",
+            linewidth=2,
+        )
+        ax_bottom.fill_between(phase_times, local_distances, color="#fca5a5", alpha=0.25)
+        ax_bottom.axhline(
+            y=local_norm_dist,
+            color="#64748b",
+            linestyle="--",
+            linewidth=1.1,
+            label=f"平均误差={local_norm_dist:.3f}",
+        )
+        ax_bottom.scatter(
+            [peak_time],
+            [peak_error],
+            color="#991b1b",
+            s=42,
+            zorder=3,
+            label=f"峰值误差={peak_error:.3f}",
+        )
+
+        for hint_idx, hint in enumerate(phase_hints.get(phase_id, [])[:6]):
+            query_time_s = float(hint.get("query_time_s", 0.0)) - qry_zero
+            ax_bottom.axvline(
+                x=query_time_s,
+                color="#f59e0b",
+                alpha=0.35,
+                linewidth=1.2,
+                label="提示触发点" if hint_idx == 0 else None,
             )
 
-        for hint in phase_hints.get(phase_id, [])[:6]:
-            query_time_s = float(hint.get("query_time_s", 0.0)) - qry_zero
-            plt.axvline(x=query_time_s, color="orange", alpha=0.18, linewidth=1)
+        ax_bottom.set_xlabel("阶段相对时间（秒）")
+        ax_bottom.set_ylabel("局部对齐误差")
+        ax_bottom.grid(alpha=0.18, linestyle="--")
+        ax_bottom.legend(loc="upper right")
 
-        plt.title(f"{qry_row['phase_name']} | score={local_score:.1f} | norm_dist={local_norm_dist:.4f}")
-        plt.xlabel("Local Time (s)")
-        plt.ylabel("Pose Feature Norm")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=150)
-        plt.close()
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=150)
+        plt.close(fig)
 
         phase_plot_rows.append(
             {
@@ -405,6 +489,9 @@ def render_feedback_video(
     frame_phase_map: Optional[Dict[int, str]] = None,
     frame_cue_map: Optional[Dict[int, str]] = None,
     preview: bool = False,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    progress_range: Tuple[int, int] = (72, 92),
+    compare_panel_height: int = 540,
 ) -> None:
     cap = cv2.VideoCapture(query_video)
     if not cap.isOpened():
@@ -436,6 +523,9 @@ def render_feedback_video(
     current_ref_frame: Optional[np.ndarray] = None
     current_phase_name = ""
     current_phase_cue = ""
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    progress_start, progress_end = progress_range
+    progress_span = max(0, progress_end - progress_start)
 
     while True:
         ok, query_frame = cap.read()
@@ -489,6 +579,7 @@ def render_feedback_video(
                 align_info=current_align_info,
                 phase_name=current_phase_name,
                 phase_cue=current_phase_cue,
+                max_panel_height=compare_panel_height,
             )
         else:
             lines = [f"最终得分：{score:.1f}/100"]
@@ -526,6 +617,10 @@ def render_feedback_video(
                 close_preview_windows()
 
         frame_idx += 1
+        if progress_callback and total_frames > 0 and frame_idx % 30 == 0:
+            rendered_ratio = min(1.0, frame_idx / max(1, total_frames))
+            progress = progress_start + int(round(progress_span * rendered_ratio))
+            progress_callback(progress, "正在生成对比视频")
 
     if writer is not None:
         writer.release()

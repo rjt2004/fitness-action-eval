@@ -37,7 +37,6 @@ async function handleLogin() {
     <div class="login-page__hero">
       <div class="login-page__badge">Fitness Action Evaluation</div>
       <h1>基于图像的健身动作评价系统</h1>
-      <p>面向八段锦教学、跟练与动作纠错的一体化平台。</p>
     </div>
 
     <div class="login-panel soft-card">

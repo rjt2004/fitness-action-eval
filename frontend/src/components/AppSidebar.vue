@@ -35,8 +35,7 @@ function handleSelect(name) {
     <div class="app-sidebar__brand">
       <div class="app-sidebar__badge">FIT</div>
       <div>
-        <div class="app-sidebar__title">动作评价系统</div>
-        <div class="app-sidebar__subtitle">八段锦专项</div>
+        <div class="app-sidebar__title">健身动作评价</div>
       </div>
     </div>
 
@@ -88,12 +87,6 @@ function handleSelect(name) {
 .app-sidebar__title {
   font-size: 18px;
   font-weight: 800;
-}
-
-.app-sidebar__subtitle {
-  margin-top: 2px;
-  color: rgba(236, 254, 255, 0.8);
-  font-size: 12px;
 }
 
 .app-sidebar__menu {

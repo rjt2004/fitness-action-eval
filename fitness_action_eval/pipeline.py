@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections import deque
+from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Optional, Union
 
 import cv2
@@ -27,6 +29,7 @@ from fitness_action_eval.pose import (
 from fitness_action_eval.visualization import (
     close_preview_windows,
     compose_compare_frame,
+    compose_live_query_frame,
     draw_pose_skeleton,
     draw_text_block,
     get_aligned_reference_frame,
@@ -54,8 +57,10 @@ def _ensure_baduanjin_features(data: Dict[str, Any]) -> Dict[str, Any]:
     else:
         data["base_features"] = data.get("base_features", data["features"])
 
-    if "phase_ids" not in data:
-        data["phase_ids"] = build_phase_ids(int(data["points"].shape[0])).astype(np.int32)
+    data["phase_ids"] = build_phase_ids(
+        int(data["points"].shape[0]),
+        time_s=data.get("time_s"),
+    ).astype(np.int32)
 
     data["phase_rows"] = phase_metadata_rows(data["phase_ids"], data["time_s"])
     data["features"] = apply_phase_feature_weights(data["base_features"], data["phase_ids"])
@@ -197,6 +202,7 @@ def finalize_scoring_outputs(
     out_plot: str,
     out_video: Optional[str],
     preview: bool,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, Any]:
     norm_dist = dist / max(1, len(path))
     score = distance_to_score(norm_dist, score_scale)
@@ -221,6 +227,8 @@ def finalize_scoring_outputs(
         hint["ref_time_s"] = float(ref_data["time_s"][int(hint["ref_index"])])
 
     ensure_parent_dir(out_json)
+    if progress_callback:
+        progress_callback(55, "正在生成分阶段 DTW 图")
     phase_plot_dir = os.path.join(os.path.dirname(os.path.abspath(out_plot)), "phase_plots")
     phase_plots = save_phase_plots(
         ref_data=ref_data,
@@ -256,6 +264,8 @@ def finalize_scoring_outputs(
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
+    if progress_callback:
+        progress_callback(62, "正在生成整体 DTW 曲线")
     save_plot(
         ref_data=ref_data,
         qry_data=qry_data,
@@ -292,6 +302,8 @@ def finalize_scoring_outputs(
     frame_phase_map, frame_cue_map = _phase_maps_for_query(alignment_map=alignment_map, ref_data=ref_data)
 
     if out_video or preview:
+        if progress_callback:
+            progress_callback(72, "正在渲染对比视频")
         render_feedback_video(
             ref_video=ref_video,
             query_video=query_video,
@@ -305,7 +317,12 @@ def finalize_scoring_outputs(
             frame_phase_map=frame_phase_map,
             frame_cue_map=frame_cue_map,
             preview=preview,
+            progress_callback=progress_callback,
+            progress_range=(72, 92),
+            compare_panel_height=540,
         )
+    elif progress_callback:
+        progress_callback(92, "评估结果已生成")
 
     return {
         "result": result,
@@ -330,7 +347,10 @@ def run_dtw_scoring(
     out_video: Optional[str] = None,
     frame_stride: int = 1,
     preview: bool = False,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, Any]:
+    if progress_callback:
+        progress_callback(8, "正在提取标准视频姿态")
     ref_data = extract_pose_sequence(
         video_path=ref_video,
         task_model=task_model,
@@ -340,6 +360,8 @@ def run_dtw_scoring(
         preview=preview,
         preview_title="Reference Pose Preview",
     )
+    if progress_callback:
+        progress_callback(25, "正在提取待测视频姿态")
     qry_data = extract_pose_sequence(
         video_path=query_video,
         task_model=task_model,
@@ -351,7 +373,11 @@ def run_dtw_scoring(
     )
     ref_data = _ensure_baduanjin_features(ref_data)
     qry_data = _ensure_baduanjin_features(qry_data)
+    if progress_callback:
+        progress_callback(42, "正在执行 DTW 对齐")
     dist, path = dtw_distance_multidim(ref_data["features"], qry_data["features"])
+    if progress_callback:
+        progress_callback(50, "正在生成评分结果")
     return finalize_scoring_outputs(
         ref_data=ref_data,
         qry_data=qry_data,
@@ -367,6 +393,7 @@ def run_dtw_scoring(
         out_plot=out_plot,
         out_video=out_video,
         preview=preview,
+        progress_callback=progress_callback,
     )
 
 
@@ -381,20 +408,29 @@ def run_dtw_scoring_from_template(
     hint_threshold: float = 0.18,
     hint_min_interval: int = 8,
     max_hints: int = 40,
+    query_frame_stride: Optional[int] = None,
+    query_smooth_window: Optional[int] = None,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, Any]:
     # 直接加载模板并只处理待测视频，适合重复评分场景。
     ref_data = load_pose_template(template_path)
+    if progress_callback:
+        progress_callback(12, "模板已加载，正在提取待测视频姿态")
     qry_data = extract_pose_sequence(
         video_path=query_video,
         task_model=ref_data["task_model"],
         num_poses=max(1, ref_data["num_poses"]),
-        smooth_window=max(1, ref_data["smooth_window"]),
-        frame_stride=max(1, ref_data.get("frame_stride", 1)),
+        smooth_window=max(1, int(query_smooth_window or ref_data["smooth_window"])),
+        frame_stride=max(1, int(query_frame_stride or ref_data.get("frame_stride", 1))),
         preview=preview,
         preview_title="Query Pose Preview",
     )
     qry_data = _ensure_baduanjin_features(qry_data)
+    if progress_callback:
+        progress_callback(42, "正在执行 DTW 对齐")
     dist, path = dtw_distance_multidim(ref_data["features"], qry_data["features"])
+    if progress_callback:
+        progress_callback(50, "正在生成评分结果")
     summary = finalize_scoring_outputs(
         ref_data=ref_data,
         qry_data=qry_data,
@@ -410,6 +446,7 @@ def run_dtw_scoring_from_template(
         out_plot=out_plot,
         out_video=out_video,
         preview=preview,
+        progress_callback=progress_callback,
     )
     summary["template_path"] = template_path
     return summary
@@ -474,6 +511,8 @@ def run_camera_coach(
     smooth_window: int,
     score_scale: float,
     hint_threshold: float,
+    hint_min_interval: int,
+    max_hints: int,
     ref_search_window: int,
     frame_stride: int = 1,
     camera_width: Optional[int] = None,
@@ -484,7 +523,10 @@ def run_camera_coach(
     preview: bool = True,
     max_frames: Optional[int] = None,
     stop_checker: Optional[Callable[[], bool]] = None,
+    pause_checker: Optional[Callable[[], bool]] = None,
+    frame_callback: Optional[Callable[[np.ndarray], None]] = None,
 ) -> Dict[str, Any]:
+    capture_stride = max(1, int(frame_stride))
     ref_data = _load_or_prepare_reference(
         template_path=template_path,
         ref_video=ref_video,
@@ -507,12 +549,15 @@ def run_camera_coach(
     if fps <= 0 or fps > 120:
         fps = 30.0
 
-    ref_cap = cv2.VideoCapture(ref_video_path) if ref_video_path else None
+    record_compare_video = bool(out_video)
+    ref_cap = cv2.VideoCapture(ref_video_path) if record_compare_video and ref_video_path else None
     if ref_cap is not None and not ref_cap.isOpened():
         cap.release()
         raise FileNotFoundError(f"Cannot open video: {ref_video_path}")
 
     writer = None
+    writer_kind: Optional[str] = None
+    actual_out_video = out_video
     if out_video:
         ensure_parent_dir(out_video)
 
@@ -526,6 +571,9 @@ def run_camera_coach(
     active_hint_left = 0
     keep_frames = max(1, int(round(fps * 0.8)))
     running_scores: list[float] = []
+    live_hints: list[dict[str, Any]] = []
+    processed_idx = 0
+    last_hint_processed_idx = -10**9
     latest_phase_name = ""
     latest_phase_cue = ""
     latest_local_err = float("nan")
@@ -535,11 +583,20 @@ def run_camera_coach(
         while True:
             if stop_checker is not None and stop_checker():
                 break
+            while pause_checker is not None and pause_checker():
+                if stop_checker is not None and stop_checker():
+                    break
+                time.sleep(0.05)
+            if stop_checker is not None and stop_checker():
+                break
             if max_frames is not None and frame_idx >= max_frames:
                 break
             ok, frame = cap.read()
             if not ok:
                 break
+            if frame_idx % capture_stride != 0:
+                frame_idx += 1
+                continue
             if camera_mirror:
                 frame = cv2.flip(frame, 1)
 
@@ -591,6 +648,23 @@ def run_camera_coach(
                     qry_angles=current_angles,
                 )
                 active_hint_left = keep_frames if active_hint else max(0, active_hint_left - 1)
+                if (
+                    active_hint
+                    and len(live_hints) < int(max_hints)
+                    and (processed_idx - last_hint_processed_idx) >= int(hint_min_interval)
+                ):
+                    live_hints.append(
+                        {
+                            "query_frame": int(frame_idx),
+                            "query_time_s": float(frame_idx / fps),
+                            "phase_name": latest_phase_name,
+                            "cue": latest_phase_cue,
+                            "part": latest_part,
+                            "message": active_hint,
+                            "score": float(instant_score),
+                        }
+                    )
+                    last_hint_processed_idx = processed_idx
             else:
                 draw_text_block(
                     query_view,
@@ -620,48 +694,116 @@ def run_camera_coach(
             if active_hint_left > 0:
                 active_hint_left -= 1
 
-            output_frame = compose_compare_frame(
-                ref_frame=ref_view,
+            live_preview_frame = compose_live_query_frame(
                 qry_frame=query_view,
                 score=current_score,
                 current_local_err=latest_local_err,
                 active_hint=hint_text,
-                align_info={
-                    "ref_frame": int(ref_data["frame_indices"][current_ref_seq_idx]),
-                    "qry_frame": int(frame_idx),
-                    "ref_seq_idx": int(current_ref_seq_idx),
-                    "qry_seq_idx": int(frame_idx),
-                    "path_step": int(current_ref_seq_idx),
-                    "path_total": int(ref_data["features"].shape[0]),
-                },
                 phase_name=latest_phase_name,
                 phase_cue=latest_phase_cue,
             )
+            if frame_callback is not None:
+                frame_callback(live_preview_frame)
 
-            if writer is None and out_video:
-                writer = cv2.VideoWriter(
-                    out_video,
+            output_frame = None
+            if record_compare_video:
+                output_frame = compose_compare_frame(
+                    ref_frame=ref_view,
+                    qry_frame=query_view,
+                    score=current_score,
+                    current_local_err=latest_local_err,
+                    active_hint=hint_text,
+                    align_info={
+                        "ref_frame": int(ref_data["frame_indices"][current_ref_seq_idx]),
+                        "qry_frame": int(frame_idx),
+                        "ref_seq_idx": int(current_ref_seq_idx),
+                        "qry_seq_idx": int(frame_idx),
+                        "path_step": int(current_ref_seq_idx),
+                        "path_total": int(ref_data["features"].shape[0]),
+                    },
+                    phase_name=latest_phase_name,
+                    phase_cue=latest_phase_cue,
+                    max_panel_height=480,
+                )
+                if output_frame.shape[1] % 2 != 0:
+                    output_frame = cv2.copyMakeBorder(
+                        output_frame,
+                        0,
+                        0,
+                        0,
+                        1,
+                        cv2.BORDER_CONSTANT,
+                        value=(16, 16, 16),
+                    )
+                if output_frame.shape[0] % 2 != 0:
+                    output_frame = cv2.copyMakeBorder(
+                        output_frame,
+                        0,
+                        1,
+                        0,
+                        0,
+                        cv2.BORDER_CONSTANT,
+                        value=(16, 16, 16),
+                    )
+
+            if writer is None and out_video and output_frame is not None:
+                cv_writer = cv2.VideoWriter(
+                    actual_out_video or out_video,
                     cv2.VideoWriter_fourcc(*"mp4v"),
                     fps,
                     (output_frame.shape[1], output_frame.shape[0]),
                 )
-                if not writer.isOpened():
-                    cap.release()
-                    if ref_cap is not None:
-                        ref_cap.release()
-                    raise RuntimeError(f"Cannot open video writer: {out_video}")
+                if cv_writer.isOpened():
+                    writer = cv_writer
+                    writer_kind = "cv2"
+                else:
+                    cv_writer.release()
+                    try:
+                        import imageio.v2 as imageio
 
-            if writer is not None:
-                writer.write(output_frame)
+                        writer = imageio.get_writer(
+                            actual_out_video or out_video,
+                            fps=max(1, int(round(fps))),
+                            codec="libx264",
+                            macro_block_size=2,
+                        )
+                        writer_kind = "imageio"
+                    except Exception:
+                        fallback_path = str(Path(out_video).with_suffix(".avi"))
+                        cv_writer = cv2.VideoWriter(
+                            fallback_path,
+                            cv2.VideoWriter_fourcc(*"MJPG"),
+                            fps,
+                            (output_frame.shape[1], output_frame.shape[0]),
+                        )
+                        if cv_writer.isOpened():
+                            writer = cv_writer
+                            writer_kind = "cv2"
+                            actual_out_video = fallback_path
+                        else:
+                            cap.release()
+                            if ref_cap is not None:
+                                ref_cap.release()
+                            raise RuntimeError(f"Cannot open video writer: {out_video}")
+
+            if writer is not None and output_frame is not None:
+                if writer_kind == "imageio":
+                    writer.append_data(cv2.cvtColor(output_frame, cv2.COLOR_BGR2RGB))
+                else:
+                    writer.write(output_frame)
             if preview:
-                if not preview_frame("Baduanjin Camera Coach", output_frame):
+                if not preview_frame("Baduanjin Camera Coach", live_preview_frame):
                     preview = False
                     close_preview_windows()
                     break
+            processed_idx += 1
             frame_idx += 1
 
     if writer is not None:
-        writer.release()
+        if writer_kind == "imageio":
+            writer.close()
+        else:
+            writer.release()
     cap.release()
     if ref_cap is not None:
         ref_cap.release()
@@ -677,8 +819,10 @@ def run_camera_coach(
         "final_phase_name": latest_phase_name,
         "final_phase_cue": latest_phase_cue,
         "final_part": latest_part,
+        "hint_count": int(len(live_hints)),
+        "hints": live_hints,
         "template_path": template_path,
-        "output_video": out_video,
+        "output_video": actual_out_video,
     }
     if out_json:
         ensure_parent_dir(out_json)

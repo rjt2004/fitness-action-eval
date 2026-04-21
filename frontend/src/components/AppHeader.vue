@@ -25,7 +25,6 @@ function handleLogout() {
 <template>
   <header class="app-header soft-card">
     <div>
-      <div class="app-header__eyebrow">Baduanjin Fitness Action Eval</div>
       <h1 class="app-header__title">{{ title }}</h1>
     </div>
     <div class="app-header__meta">
@@ -43,14 +42,6 @@ function handleLogout() {
   justify-content: space-between;
   margin: 18px 18px 0;
   padding: 18px 22px;
-}
-
-.app-header__eyebrow {
-  margin-bottom: 4px;
-  color: #0f766e;
-  font-size: 12px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
 }
 
 .app-header__title {

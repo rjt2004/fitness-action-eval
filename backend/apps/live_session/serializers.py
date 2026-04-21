@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from rest_framework import serializers
 
+from apps.template_manager.models import TemplateVideo
 from apps.template_manager.serializers import TemplateVideoListSerializer
 
 from .models import LiveSession
@@ -17,16 +19,16 @@ class LiveSessionStartSerializer(serializers.Serializer):
     camera_height = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     camera_mirror = serializers.BooleanField(required=False, default=True)
     preview = serializers.BooleanField(required=False, default=False)
+    export_video = serializers.BooleanField(required=False, default=False)
     frame_stride = serializers.IntegerField(required=False, min_value=1, default=4)
     smooth_window = serializers.IntegerField(required=False, min_value=1, default=7)
     score_scale = serializers.DecimalField(max_digits=6, decimal_places=2, required=False, default="8.00")
     hint_threshold = serializers.DecimalField(max_digits=6, decimal_places=3, required=False, default="0.180")
-    ref_search_window = serializers.IntegerField(required=False, min_value=10, default=90)
-    max_frames = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    hint_min_interval = serializers.IntegerField(required=False, min_value=1, default=8)
+    max_hints = serializers.IntegerField(required=False, min_value=1, default=40)
+    ref_search_window = serializers.IntegerField(required=False, min_value=10, default=20)
 
     def validate_template_id(self, value):
-        from apps.template_manager.models import TemplateVideo
-
         try:
             template = TemplateVideo.objects.get(id=value)
         except TemplateVideo.DoesNotExist as exc:
@@ -39,6 +41,7 @@ class LiveSessionStartSerializer(serializers.Serializer):
 class LiveSessionListSerializer(serializers.ModelSerializer):
     template = TemplateVideoListSerializer(read_only=True)
     username = serializers.CharField(source="user.username", read_only=True)
+    hint_count = serializers.SerializerMethodField()
 
     class Meta:
         model = LiveSession
@@ -48,7 +51,7 @@ class LiveSessionListSerializer(serializers.ModelSerializer):
             "session_name",
             "status",
             "avg_score",
-            "matched_frames",
+            "hint_count",
             "final_phase_name",
             "created_at",
             "started_at",
@@ -57,6 +60,22 @@ class LiveSessionListSerializer(serializers.ModelSerializer):
             "username",
             "template",
         )
+
+    def get_hint_count(self, obj: LiveSession) -> int:
+        payload = self._load_summary_payload(obj)
+        try:
+            return int(payload.get("hint_count", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _load_summary_payload(obj: LiveSession) -> dict:
+        if not obj.summary_json_path:
+            return {}
+        path = Path(obj.summary_json_path)
+        if not path.exists():
+            return {}
+        return json.loads(path.read_text(encoding="utf-8"))
 
 
 class LiveSessionDetailSerializer(LiveSessionListSerializer):
@@ -73,12 +92,14 @@ class LiveSessionDetailSerializer(LiveSessionListSerializer):
             "camera_height",
             "camera_mirror",
             "preview",
+            "export_video",
             "frame_stride",
             "smooth_window",
             "score_scale",
             "hint_threshold",
+            "hint_min_interval",
+            "max_hints",
             "ref_search_window",
-            "max_frames",
             "summary_json_path",
             "output_video_path",
             "final_phase_cue",
@@ -88,11 +109,4 @@ class LiveSessionDetailSerializer(LiveSessionListSerializer):
         )
 
     def get_summary_payload(self, obj: LiveSession):
-        if not obj.summary_json_path:
-            return {}
-        path = Path(obj.summary_json_path)
-        if not path.exists():
-            return {}
-        import json
-
-        return json.loads(path.read_text(encoding="utf-8"))
+        return self._load_summary_payload(obj)

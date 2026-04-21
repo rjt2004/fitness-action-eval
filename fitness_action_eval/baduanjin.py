@@ -251,9 +251,42 @@ BADUANJIN_PHASES: List[BaduanjinPhase] = [
     ),
 ]
 
+BADUANJIN_STANDARD_DURATION_S = 12 * 60 + 12
+
+# Standard-video phase starts/ends supplied by manual annotation.
+BADUANJIN_MANUAL_BOUNDARIES_S: List[tuple[float, float]] = [
+    (0.0, 45.0),
+    (45.0, 140.0),
+    (140.0, 225.0),
+    (225.0, 305.0),
+    (305.0, 370.0),
+    (370.0, 475.0),
+    (475.0, 600.0),
+    (600.0, 660.0),
+    (660.0, 710.0),
+    (710.0, 732.0),
+]
+
+
+def _build_phase_ids_from_manual_timing(time_s: np.ndarray) -> np.ndarray:
+    if time_s.ndim != 1 or time_s.size == 0:
+        return np.zeros((0,), dtype=np.int32)
+
+    sequence_duration = float(time_s[-1])
+    if sequence_duration <= 0:
+        return np.zeros((time_s.shape[0],), dtype=np.int32)
+
+    scale = sequence_duration / float(BADUANJIN_STANDARD_DURATION_S)
+    scaled_starts = np.asarray([start for start, _ in BADUANJIN_MANUAL_BOUNDARIES_S], dtype=np.float32) * scale
+
+    phase_ids = np.zeros((time_s.shape[0],), dtype=np.int32)
+    for phase_idx in range(1, len(scaled_starts)):
+        phase_ids[time_s >= scaled_starts[phase_idx]] = phase_idx
+    return phase_ids
+
 
 @lru_cache(maxsize=64)
-def build_phase_ids(length: int) -> np.ndarray:
+def _build_phase_ids_by_weight(length: int) -> np.ndarray:
     if length <= 0:
         return np.zeros((0,), dtype=np.int32)
     weights = np.asarray([phase.duration_weight for phase in BADUANJIN_PHASES], dtype=np.float32)
@@ -271,6 +304,16 @@ def build_phase_ids(length: int) -> np.ndarray:
     if start < length:
         phase_ids[start:] = len(BADUANJIN_PHASES) - 1
     return phase_ids
+
+
+def build_phase_ids(length: int, time_s: np.ndarray | None = None) -> np.ndarray:
+    if length <= 0:
+        return np.zeros((0,), dtype=np.int32)
+    if time_s is not None and getattr(time_s, "shape", (0,))[0] == length:
+        phase_ids = _build_phase_ids_from_manual_timing(np.asarray(time_s, dtype=np.float32))
+        if phase_ids.shape[0] == length and np.any(phase_ids):
+            return phase_ids
+    return _build_phase_ids_by_weight(length)
 
 
 def get_phase_definition(phase_id: int) -> BaduanjinPhase:

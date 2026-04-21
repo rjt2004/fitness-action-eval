@@ -1,22 +1,68 @@
 from __future__ import annotations
 
 import json
+import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
 from django.conf import settings
-
-from config.video_utils import transcode_to_browser_mp4
-from fitness_action_eval.pipeline import run_dtw_scoring_from_template
+from django.db import close_old_connections
 
 from apps.template_manager.models import FileAsset
+from config.video_utils import transcode_to_browser_mp4
+from fitness_action_eval.pipeline import run_dtw_scoring_from_template
 
 from .models import EvaluationHint, EvaluationPhaseResult, EvaluationTask
 
 
+_TASK_REGISTRY: dict[int, dict[str, object]] = {}
+_TASK_LOCK = threading.Lock()
+
+
 def generate_task_no() -> str:
     return f"EVAL{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid4().hex[:6].upper()}"
+
+
+def task_registry_status(task_id: int) -> dict[str, object]:
+    with _TASK_LOCK:
+        entry = _TASK_REGISTRY.get(task_id)
+    if not entry:
+        return {"active": False}
+
+    thread = entry["thread"]
+    assert isinstance(thread, threading.Thread)
+    return {"active": thread.is_alive()}
+
+
+def _result_paths(task: EvaluationTask) -> tuple[Path, Path, Path, Path]:
+    result_dir = Path(settings.MEDIA_ROOT) / "evaluation_center" / "results" / task.task_no
+    result_dir.mkdir(parents=True, exist_ok=True)
+    return (
+        result_dir / "result.json",
+        result_dir / "plot.png",
+        result_dir / "overlay_raw.mp4",
+        result_dir / "overlay.mp4",
+    )
+
+
+def _update_progress(task_id: int, percent: int, text: str) -> None:
+    EvaluationTask.objects.filter(id=task_id).update(
+        progress_percent=max(0, min(100, int(percent))),
+        progress_text=str(text),
+        updated_at=datetime.now(),
+    )
+
+
+def _prepare_result_video(out_video_raw: Path, out_video_web: Path) -> Path:
+    if not out_video_raw.exists():
+        return out_video_web
+    try:
+        transcode_to_browser_mp4(str(out_video_raw), str(out_video_web))
+        return out_video_web if out_video_web.exists() else out_video_raw
+    except Exception:
+        return out_video_raw
 
 
 def register_evaluation_asset(task: EvaluationTask, biz_type: str, file_path: str) -> None:
@@ -31,69 +77,6 @@ def register_evaluation_asset(task: EvaluationTask, biz_type: str, file_path: st
             "file_size": path.stat().st_size if path.exists() else 0,
         },
     )
-
-
-def run_evaluation_task(task: EvaluationTask) -> EvaluationTask:
-    result_dir = Path(settings.MEDIA_ROOT) / "evaluation_center" / "results" / task.task_no
-    result_dir.mkdir(parents=True, exist_ok=True)
-
-    out_json = result_dir / "result.json"
-    out_plot = result_dir / "plot.png"
-    out_video_raw = result_dir / "overlay_raw.mp4"
-    out_video_web = result_dir / "overlay.mp4"
-
-    task.status = EvaluationTask.Status.RUNNING
-    task.started_at = datetime.now()
-    task.error_message = ""
-    task.save(update_fields=["status", "started_at", "error_message", "updated_at"])
-
-    try:
-        summary = run_dtw_scoring_from_template(
-            template_path=task.template.template_file_path,
-            query_video=task.query_video.path,
-            out_json=str(out_json),
-            out_plot=str(out_plot),
-            out_video=str(out_video_raw),
-            preview=False,
-            score_scale=float(task.score_scale),
-            hint_threshold=float(task.hint_threshold),
-            hint_min_interval=int(task.hint_min_interval),
-            max_hints=int(task.max_hints),
-        )
-        transcode_to_browser_mp4(str(out_video_raw), str(out_video_web))
-        task.result_json_path = str(out_json)
-        task.result_plot_path = str(out_plot)
-        task.result_video_path = str(out_video_web)
-        task.score = round(float(summary["score"]), 2)
-        task.normalized_distance = round(float(summary["norm_dist"]), 4)
-        task.hint_count = int(summary["hint_count"])
-        task.status = EvaluationTask.Status.SUCCESS
-        task.finished_at = datetime.now()
-        task.save(
-            update_fields=[
-                "result_json_path",
-                "result_plot_path",
-                "result_video_path",
-                "score",
-                "normalized_distance",
-                "hint_count",
-                "status",
-                "finished_at",
-                "updated_at",
-            ]
-        )
-
-        register_evaluation_asset(task, "evaluation_input", task.query_video.path)
-        register_evaluation_asset(task, "evaluation_json", str(out_json))
-        register_evaluation_asset(task, "evaluation_plot", str(out_plot))
-        register_evaluation_asset(task, "evaluation_video", str(out_video_web))
-    except Exception as exc:
-        task.status = EvaluationTask.Status.FAILED
-        task.error_message = str(exc)
-        task.finished_at = datetime.now()
-        task.save(update_fields=["status", "error_message", "finished_at", "updated_at"])
-        raise
-    return task
 
 
 def load_result_payload(task: EvaluationTask) -> dict:
@@ -158,3 +141,171 @@ def persist_result_details(task: EvaluationTask) -> None:
         )
     if hint_rows:
         EvaluationHint.objects.bulk_create(hint_rows)
+
+
+def _finalize_success(task: EvaluationTask, out_json: Path, out_plot: Path, out_video_web: Path) -> None:
+    payload = json.loads(out_json.read_text(encoding="utf-8"))
+    task.result_json_path = str(out_json)
+    task.result_plot_path = str(out_plot)
+    task.result_video_path = str(out_video_web) if out_video_web.exists() else ""
+    task.score = round(float(payload.get("score_0_100", 0.0)), 2)
+    task.normalized_distance = round(float(payload.get("normalized_dtw_distance", 0.0)), 4)
+    task.hint_count = int(payload.get("hint_count", 0))
+    task.progress_percent = 100
+    task.progress_text = "评估完成"
+    task.status = EvaluationTask.Status.SUCCESS
+    task.finished_at = datetime.now()
+    task.error_message = ""
+    task.save(
+        update_fields=[
+            "result_json_path",
+            "result_plot_path",
+            "result_video_path",
+            "score",
+            "normalized_distance",
+            "hint_count",
+            "progress_percent",
+            "progress_text",
+            "status",
+            "finished_at",
+            "error_message",
+            "updated_at",
+        ]
+    )
+    register_evaluation_asset(task, "evaluation_input", task.query_video.path)
+    register_evaluation_asset(task, "evaluation_json", str(out_json))
+    register_evaluation_asset(task, "evaluation_plot", str(out_plot))
+    if out_video_web.exists():
+        register_evaluation_asset(task, "evaluation_video", str(out_video_web))
+    persist_result_details(task)
+
+
+def repair_stale_task(task: EvaluationTask) -> EvaluationTask:
+    if task.status not in {EvaluationTask.Status.PENDING, EvaluationTask.Status.RUNNING}:
+        return task
+    if task_registry_status(task.id)["active"]:
+        return task
+
+    out_json, out_plot, out_video_raw, out_video_web = _result_paths(task)
+    result_json = Path(task.result_json_path) if task.result_json_path else out_json
+    result_plot = Path(task.result_plot_path) if task.result_plot_path else out_plot
+    result_video = Path(task.result_video_path) if task.result_video_path else out_video_web
+
+    if result_json.exists():
+        if out_video_raw.exists() and not result_video.exists():
+            result_video = _prepare_result_video(out_video_raw, out_video_web)
+        task.refresh_from_db()
+        _finalize_success(task, result_json, result_plot, result_video)
+        return task
+
+    if task.started_at and (datetime.now() - task.started_at).total_seconds() > 300:
+        task.status = EvaluationTask.Status.FAILED
+        task.progress_text = "任务中断，请重新提交"
+        task.error_message = task.error_message or "任务未完成且没有找到结果文件。"
+        task.finished_at = datetime.now()
+        task.save(update_fields=["status", "progress_text", "error_message", "finished_at", "updated_at"])
+    return task
+
+
+def _run_evaluation_task_worker(task_id: int) -> None:
+    close_old_connections()
+    try:
+        task = EvaluationTask.objects.select_related("template", "user").get(id=task_id)
+        out_json, out_plot, out_video_raw, out_video_web = _result_paths(task)
+
+        task.status = EvaluationTask.Status.RUNNING
+        task.started_at = datetime.now()
+        task.error_message = ""
+        task.progress_percent = 5
+        task.progress_text = "开始评估"
+        task.save(
+            update_fields=[
+                "status",
+                "started_at",
+                "error_message",
+                "progress_percent",
+                "progress_text",
+                "updated_at",
+            ]
+        )
+
+        run_dtw_scoring_from_template(
+            template_path=task.template.template_file_path,
+            query_video=task.query_video.path,
+            out_json=str(out_json),
+            out_plot=str(out_plot),
+            out_video=str(out_video_raw) if task.export_video else None,
+            preview=False,
+            score_scale=float(task.score_scale),
+            hint_threshold=float(task.hint_threshold),
+            hint_min_interval=int(task.hint_min_interval),
+            max_hints=int(task.max_hints),
+            query_frame_stride=int(task.frame_stride),
+            query_smooth_window=int(task.smooth_window),
+            progress_callback=lambda percent, text: _update_progress(task_id, percent, text),
+        )
+        if task.export_video:
+            _update_progress(task_id, 96, "正在转码结果视频")
+            final_video = _prepare_result_video(out_video_raw, out_video_web)
+        else:
+            _update_progress(task_id, 96, "正在整理评估结果")
+            final_video = out_video_web
+        task.refresh_from_db()
+        _finalize_success(task, out_json, out_plot, final_video)
+    except Exception as exc:
+        task = EvaluationTask.objects.get(id=task_id)
+        task.status = EvaluationTask.Status.FAILED
+        task.error_message = str(exc)
+        task.progress_text = "评估失败"
+        task.finished_at = datetime.now()
+        task.save(update_fields=["status", "error_message", "progress_text", "finished_at", "updated_at"])
+    finally:
+        close_old_connections()
+        with _TASK_LOCK:
+            _TASK_REGISTRY.pop(task_id, None)
+
+
+def start_evaluation_task(task: EvaluationTask) -> EvaluationTask:
+    thread = threading.Thread(
+        target=_run_evaluation_task_worker,
+        args=(task.id,),
+        name=f"evaluation-task-{task.id}",
+        daemon=True,
+    )
+    with _TASK_LOCK:
+        _TASK_REGISTRY[task.id] = {"thread": thread}
+    thread.start()
+    return task
+
+
+def _safe_remove_path(path_str: str) -> None:
+    if not path_str:
+        return
+    path = Path(path_str)
+    if not path.exists():
+        return
+    media_root = Path(settings.MEDIA_ROOT).resolve()
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return
+    if media_root not in resolved.parents and resolved != media_root:
+        return
+    if path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def delete_evaluation_task(task: EvaluationTask) -> None:
+    if task.status in {EvaluationTask.Status.PENDING, EvaluationTask.Status.RUNNING}:
+        raise ValueError("运行中的评估任务请等待完成后再删除。")
+
+    query_video_path = task.query_video.path if task.query_video else ""
+    result_dir = Path(settings.MEDIA_ROOT) / "evaluation_center" / "results" / task.task_no
+
+    FileAsset.objects.filter(biz_id=task.id, biz_type__startswith="evaluation_").delete()
+    task.delete()
+
+    _safe_remove_path(query_video_path)
+    _safe_remove_path(str(result_dir))

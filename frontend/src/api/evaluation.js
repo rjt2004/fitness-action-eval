@@ -21,3 +21,7 @@ export function getEvaluationTaskPhases(id) {
 export function getEvaluationTaskHints(id) {
   return request.get(`/api/evaluation-center/tasks/${id}/hints/`);
 }
+
+export function deleteEvaluationTask(id) {
+  return request.delete(`/api/evaluation-center/tasks/${id}/delete/`);
+}
