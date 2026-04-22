@@ -22,28 +22,50 @@ let timer = null;
 let previewCounter = 0;
 let leaveStopping = false;
 
-const form = reactive({
-  template_id: "",
-  session_name: "实时跟练会话",
-  camera_source: "0",
+const REALTIME_DEFAULTS = {
   camera_width: 640,
   camera_height: 360,
   camera_mirror: true,
   export_video: false,
-  frame_stride: 4,
-  smooth_window: 5,
-  hint_threshold: 0.18,
-  hint_min_interval: 8,
-  max_hints: 40,
-  ref_search_window: 20,
+  frame_stride: 8,
+  smooth_window: 3,
+  hint_threshold: 0.2,
+  hint_min_interval: 6,
+  max_hints: 60,
+  ref_search_window: 10,
+};
+
+const form = reactive({
+  template_id: "",
+  session_name: "实时跟练会话",
+  camera_source: "0",
+  ...REALTIME_DEFAULTS,
 });
 
 const sessionActive = computed(() =>
   ["pending", "running"].includes(currentSession.value?.status || ""),
 );
-const canPauseReference = computed(() => Boolean(currentSession.value?.id) && sessionActive.value && !referencePaused.value);
-const canResumeReference = computed(() => Boolean(currentSession.value?.id) && sessionActive.value && referencePaused.value);
-const liveHints = computed(() => currentSession.value?.summary_payload?.hints || []);
+const realtimeInfo = computed(() => {
+  const runtime = currentSession.value?.runtime_payload || {};
+  const summary = currentSession.value?.summary_payload || {};
+  const latestHint = Array.isArray(summary.hints) && summary.hints.length ? summary.hints[summary.hints.length - 1] : {};
+  return {
+    phase_name: runtime.phase_name || summary.final_phase_name || currentSession.value?.final_phase_name || "",
+    phase_cue: runtime.phase_cue || summary.final_phase_cue || currentSession.value?.final_phase_cue || "",
+    part: runtime.part || latestHint.part || currentSession.value?.final_part || "",
+    message: runtime.message || latestHint.message || "",
+    score: runtime.score ?? currentSession.value?.avg_score ?? "",
+    query_time_s: runtime.query_time_s ?? latestHint.query_time_s ?? "",
+    local_error: runtime.local_error ?? "",
+  };
+});
+
+const realtimeMessage = computed(() => {
+  if (!currentSession.value?.id) return "开始跟练后，这里会显示实时纠错提示";
+  if (realtimeInfo.value.message) return realtimeInfo.value.message;
+  if (sessionActive.value) return "当前动作保持较好，继续跟随参考视频";
+  return "本次会话已结束";
+});
 
 function toMediaUrl(path) {
   if (!path) return "";
@@ -114,10 +136,6 @@ async function loadTemplateDetail(templateId) {
   templateLoading.value = true;
   try {
     selectedTemplate.value = await getTemplateDetail(templateId);
-    if (selectedTemplate.value) {
-      form.frame_stride = selectedTemplate.value.frame_stride || 4;
-      form.smooth_window = selectedTemplate.value.smooth_window || 5;
-    }
   } finally {
     templateLoading.value = false;
   }
@@ -194,14 +212,6 @@ async function handleStart() {
   }
 }
 
-function handlePauseReference() {
-  pauseReferenceVideo();
-}
-
-function handleResumeReference() {
-  playReferenceVideo();
-}
-
 async function handleStop() {
   if (!currentSession.value?.id) return;
   await stopLiveSession(currentSession.value.id);
@@ -272,10 +282,6 @@ onBeforeUnmount(() => {
               preload="metadata"
             />
             <el-empty v-else description="请选择可用模板" />
-
-            <div v-if="selectedTemplate" class="template-meta">
-              <div><strong>模板名称：</strong>{{ selectedTemplate.template_name }}</div>
-            </div>
           </div>
         </section>
 
@@ -351,26 +357,38 @@ onBeforeUnmount(() => {
 
             <el-form-item>
               <el-button type="primary" :loading="loading" @click="handleStart">开始跟练</el-button>
-              <el-button :disabled="!canPauseReference" @click="handlePauseReference">暂停参考</el-button>
-              <el-button type="success" plain :disabled="!canResumeReference" @click="handleResumeReference">
-                继续参考
-              </el-button>
               <el-button type="danger" plain @click="handleStop">停止</el-button>
             </el-form-item>
           </el-form>
         </section>
 
         <section class="soft-card page-panel" style="margin-top: 20px">
-          <h3 class="section-title">提示列表</h3>
-          <el-empty v-if="!liveHints.length" description="会话过程中产生的提示会显示在这里" />
-          <div v-else class="hint-scroll">
-            <div v-for="(item, index) in liveHints" :key="`${item.query_time_s}-${index}`" class="hint-item">
-              <div class="hint-item__meta">
-                <span>{{ item.query_time_s }}s</span>
-                <span>{{ item.phase_name || "--" }}</span>
-                <span>{{ item.part || "--" }}</span>
+          <h3 class="section-title">实时提示</h3>
+          <div class="live-coach-card">
+            <div class="live-coach-card__label">当前提示</div>
+            <div class="live-coach-card__message">{{ realtimeMessage }}</div>
+
+            <div class="live-coach-grid">
+              <div class="live-coach-field">
+                <span>动作阶段</span>
+                <strong>{{ realtimeInfo.phase_name || "--" }}</strong>
               </div>
-              <div class="hint-item__message">{{ item.message }}</div>
+              <div class="live-coach-field">
+                <span>关注部位</span>
+                <strong>{{ realtimeInfo.part || "--" }}</strong>
+              </div>
+              <div class="live-coach-field live-coach-field--wide">
+                <span>动作要领</span>
+                <strong>{{ realtimeInfo.phase_cue || "跟随参考视频完成当前动作" }}</strong>
+              </div>
+              <div class="live-coach-field">
+                <span>当前分数</span>
+                <strong>{{ realtimeInfo.score !== "" ? Number(realtimeInfo.score).toFixed(1) : "--" }}</strong>
+              </div>
+              <div class="live-coach-field">
+                <span>局部偏差</span>
+                <strong>{{ realtimeInfo.local_error !== "" ? Number(realtimeInfo.local_error).toFixed(3) : "--" }}</strong>
+              </div>
             </div>
           </div>
         </section>
@@ -388,7 +406,30 @@ onBeforeUnmount(() => {
 
 .left-column,
 .right-column {
+  display: contents;
   min-width: 0;
+}
+
+.left-column > .page-panel:first-child {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.left-column > .page-panel:nth-child(2) {
+  grid-column: 1;
+  grid-row: 2;
+  margin-top: 0 !important;
+}
+
+.right-column > .page-panel:first-child {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.right-column > .page-panel:nth-child(2) {
+  grid-column: 2;
+  grid-row: 2;
+  margin-top: 0 !important;
 }
 
 .page-panel {
@@ -411,53 +452,88 @@ onBeforeUnmount(() => {
   max-height: 360px;
 }
 
-.template-meta {
-  display: grid;
-  gap: 8px;
-  margin-top: 14px;
-  color: #334155;
-}
-
 .grid-two {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px 18px;
 }
 
-.hint-scroll {
-  display: flex;
-  flex-direction: column;
+.live-coach-card {
+  padding: 20px;
+  border: 1px solid rgba(20, 83, 45, 0.14);
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at top left, rgba(187, 247, 208, 0.78), transparent 38%),
+    linear-gradient(135deg, #f0fdf4 0%, #f8fafc 100%);
+}
+
+.live-coach-card__label {
+  color: #166534;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.live-coach-card__message {
+  margin-top: 10px;
+  color: #0f172a;
+  font-size: 28px;
+  font-weight: 900;
+  line-height: 1.35;
+}
+
+.live-coach-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  max-height: 360px;
-  overflow-y: auto;
-  padding-right: 4px;
+  margin-top: 18px;
 }
 
-.hint-item {
+.live-coach-field {
+  min-height: 86px;
   padding: 14px 16px;
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  border-radius: 14px;
-  background: #f8fbfa;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.8);
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.06);
 }
 
-.hint-item__meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+.live-coach-field--wide {
+  grid-column: 1 / -1;
+}
+
+.live-coach-field span {
+  display: block;
   color: #64748b;
-  font-size: 13px;
+  font-size: 14px;
+  font-weight: 700;
 }
 
-.hint-item__message {
+.live-coach-field strong {
+  display: block;
   margin-top: 8px;
   color: #0f172a;
-  line-height: 1.7;
+  font-size: 21px;
+  font-weight: 900;
+  line-height: 1.45;
 }
 
 @media (max-width: 1200px) {
   .content-grid,
-  .grid-two {
+  .grid-two,
+  .live-coach-grid {
     grid-template-columns: 1fr;
+  }
+
+  .left-column > .page-panel:first-child,
+  .left-column > .page-panel:nth-child(2),
+  .right-column > .page-panel:first-child,
+  .right-column > .page-panel:nth-child(2) {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .live-coach-card__message {
+    font-size: 24px;
   }
 }
 </style>

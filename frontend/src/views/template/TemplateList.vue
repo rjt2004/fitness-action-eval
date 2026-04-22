@@ -1,8 +1,7 @@
 <script setup>
-import { onMounted, reactive, ref } from "vue";
+import { onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
-  buildTemplate,
   deleteTemplate,
   getTemplateList,
   uploadTemplate,
@@ -11,6 +10,7 @@ import {
 const loading = ref(false);
 const tableData = ref([]);
 const uploadFile = ref(null);
+let pollTimer = null;
 
 const form = reactive({
   template_name: "八段锦标准模板",
@@ -21,17 +21,40 @@ const form = reactive({
 function statusType(status) {
   if (status === "ready") return "success";
   if (status === "failed") return "danger";
+  if (status === "building") return "warning";
   return "warning";
 }
 
 function statusLabel(status) {
   if (status === "ready") return "已生成";
   if (status === "failed") return "生成失败";
+  if (status === "building") return "生成中";
   return "草稿";
+}
+
+function progressText(row) {
+  if (row.progress_text) return row.progress_text;
+  if (row.status === "ready") return "模板生成完成";
+  if (row.status === "failed") return "模板生成失败";
+  return "处理中";
+}
+
+function clearPolling() {
+  if (pollTimer) {
+    window.clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function schedulePolling() {
+  clearPolling();
+  if (!tableData.value.some((item) => ["draft", "building"].includes(item.status))) return;
+  pollTimer = window.setTimeout(loadData, 3000);
 }
 
 async function loadData() {
   tableData.value = await getTemplateList();
+  schedulePolling();
 }
 
 function handleFileChange(file) {
@@ -53,20 +76,8 @@ async function handleUploadAndBuild() {
   loading.value = true;
   try {
     const uploaded = await uploadTemplate(payload);
-    const built = await buildTemplate(uploaded.id);
-    ElMessage.success(`模板已生成：${built.template_name}`);
+    ElMessage.success(`模板已上传，正在生成：${uploaded.template_name}`);
     uploadFile.value = null;
-    await loadData();
-  } finally {
-    loading.value = false;
-  }
-}
-
-async function handleRebuild(row) {
-  loading.value = true;
-  try {
-    const data = await buildTemplate(row.id);
-    ElMessage.success(`模板已重新生成：${data.template_name}`);
     await loadData();
   } finally {
     loading.value = false;
@@ -95,6 +106,7 @@ async function handleDelete(row) {
 }
 
 onMounted(loadData);
+onBeforeUnmount(clearPolling);
 </script>
 
 <template>
@@ -140,26 +152,27 @@ onMounted(loadData);
             <el-tag :type="statusType(row.status)">{{ statusLabel(row.status) }}</el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="进度" min-width="220">
+          <template #default="{ row }">
+            <div v-if="['draft', 'building'].includes(row.status)" class="progress-cell">
+              <el-progress :percentage="Number(row.progress_percent || 0)" :stroke-width="12" />
+              <span class="progress-cell__text">{{ progressText(row) }}</span>
+            </div>
+            <span v-else>{{ progressText(row) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="frame_stride" label="抽帧" width="100" />
         <el-table-column prop="smooth_window" label="平滑" width="100" />
         <el-table-column prop="created_by_name" label="创建人" width="120" />
         <el-table-column prop="created_at" label="创建时间" min-width="180" />
-        <el-table-column label="操作" width="220">
+        <el-table-column label="操作" width="120">
           <template #default="{ row }">
             <div class="row-actions">
               <el-button
                 size="small"
-                type="primary"
-                :disabled="loading"
-                @click="handleRebuild(row)"
-              >
-                重新生成
-              </el-button>
-              <el-button
-                size="small"
                 type="danger"
                 plain
-                :disabled="loading"
+                :disabled="loading || row.status === 'building'"
                 @click="handleDelete(row)"
               >
                 删除
@@ -186,5 +199,16 @@ onMounted(loadData);
 .row-actions {
   display: flex;
   gap: 8px;
+}
+
+.progress-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.progress-cell__text {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 </style>

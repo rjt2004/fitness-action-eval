@@ -116,8 +116,11 @@ def save_pose_template(
     template_path: str,
     frame_stride: int = 1,
     preview: bool = False,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, Any]:
     # 预处理标准动作视频并导出模板文件，供后续重复评分直接加载。
+    if progress_callback:
+        progress_callback(5, "开始生成模板")
     ref_data = extract_pose_sequence(
         video_path=ref_video,
         task_model=task_model,
@@ -126,8 +129,15 @@ def save_pose_template(
         frame_stride=max(1, frame_stride),
         preview=preview,
         preview_title="Reference Pose Preview",
+        progress_callback=progress_callback,
+        progress_range=(8, 88),
+        progress_message="正在提取标准视频姿态",
     )
+    if progress_callback:
+        progress_callback(92, "正在生成阶段特征")
     ref_data = _ensure_baduanjin_features(ref_data)
+    if progress_callback:
+        progress_callback(96, "正在保存模板文件")
     ensure_parent_dir(template_path)
     np.savez_compressed(
         template_path,
@@ -139,6 +149,8 @@ def save_pose_template(
             ref_data=ref_data,
         ),
     )
+    if progress_callback:
+        progress_callback(100, "模板生成完成")
     return {
         "template_path": template_path,
         "reference_video": ref_video,
@@ -525,6 +537,7 @@ def run_camera_coach(
     stop_checker: Optional[Callable[[], bool]] = None,
     pause_checker: Optional[Callable[[], bool]] = None,
     frame_callback: Optional[Callable[[np.ndarray], None]] = None,
+    state_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     capture_stride = max(1, int(frame_stride))
     ref_data = _load_or_prepare_reference(
@@ -578,6 +591,9 @@ def run_camera_coach(
     latest_phase_cue = ""
     latest_local_err = float("nan")
     latest_part = ""
+    ref_times = np.asarray(ref_data.get("time_s"), dtype=np.float32)
+    ref_length = int(ref_data["features"].shape[0])
+    session_start_time = time.perf_counter()
 
     with create_pose_landmarker(task_model=ref_data["task_model"], num_poses=ref_data["num_poses"]) as landmarker:
         while True:
@@ -597,6 +613,11 @@ def run_camera_coach(
             if frame_idx % capture_stride != 0:
                 frame_idx += 1
                 continue
+            if camera_width or camera_height:
+                target_width = int(camera_width or frame.shape[1])
+                target_height = int(camera_height or frame.shape[0])
+                if frame.shape[1] != target_width or frame.shape[0] != target_height:
+                    frame = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
             if camera_mirror:
                 frame = cv2.flip(frame, 1)
 
@@ -619,9 +640,18 @@ def run_camera_coach(
                     feature_std=ref_data["feature_std"],
                 )
 
-                search_start = current_ref_seq_idx
-                search_end = min(ref_data["features"].shape[0], search_start + max(10, int(ref_search_window)))
-                best_ref_idx = search_start
+                elapsed_s = time.perf_counter() - session_start_time
+                if ref_times.size:
+                    target_time_s = min(float(elapsed_s), float(ref_times[-1]))
+                    target_ref_seq_idx = int(np.searchsorted(ref_times, target_time_s, side="left"))
+                    target_ref_seq_idx = int(np.clip(target_ref_seq_idx, 0, ref_length - 1))
+                else:
+                    target_ref_seq_idx = min(current_ref_seq_idx + 1, ref_length - 1)
+
+                search_radius = max(3, int(ref_search_window))
+                search_start = max(0, target_ref_seq_idx - search_radius)
+                search_end = min(ref_length, target_ref_seq_idx + search_radius + 1)
+                best_ref_idx = target_ref_seq_idx
                 best_dist = float("inf")
                 for ref_idx in range(search_start, search_end):
                     weighted_feature = weight_single_feature(current_feature, int(ref_data["phase_ids"][ref_idx]))
@@ -631,7 +661,7 @@ def run_camera_coach(
                         best_ref_idx = ref_idx
 
                 current_ref_seq_idx = best_ref_idx
-                phase = get_phase_definition(int(ref_data["phase_ids"][current_ref_seq_idx]))
+                phase = get_phase_definition(int(ref_data["phase_ids"][target_ref_seq_idx]))
                 latest_phase_name = phase.display_name
                 latest_phase_cue = phase.cue
                 instant_score = distance_to_score(best_dist, score_scale)
@@ -643,7 +673,7 @@ def run_camera_coach(
                     ref_points=ref_data["points"][current_ref_seq_idx],
                     qry_points=current_points,
                     hint_threshold=hint_threshold,
-                    phase_id=int(ref_data["phase_ids"][current_ref_seq_idx]),
+                    phase_id=int(ref_data["phase_ids"][target_ref_seq_idx]),
                     ref_angles=ref_data["angle_features"][current_ref_seq_idx],
                     qry_angles=current_angles,
                 )
@@ -693,6 +723,19 @@ def run_camera_coach(
             hint_text = active_hint if active_hint_left > 0 else ""
             if active_hint_left > 0:
                 active_hint_left -= 1
+            if state_callback is not None:
+                state_callback(
+                    {
+                        "query_frame": int(frame_idx),
+                        "query_time_s": float(frame_idx / fps),
+                        "phase_name": latest_phase_name,
+                        "phase_cue": latest_phase_cue,
+                        "part": latest_part,
+                        "message": hint_text,
+                        "score": current_score,
+                        "local_error": latest_local_err,
+                    }
+                )
 
             live_preview_frame = compose_live_query_frame(
                 qry_frame=query_view,

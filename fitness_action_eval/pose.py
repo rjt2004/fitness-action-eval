@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import cv2
 import mediapipe as mp
@@ -188,6 +188,9 @@ def extract_pose_sequence(
     frame_stride: int = 1,
     preview: bool = False,
     preview_title: str = "Pose Preview",
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    progress_range: Tuple[int, int] = (0, 100),
+    progress_message: str = "正在提取视频姿态",
 ) -> Dict[str, Any]:
     # 从视频中提取逐帧姿态序列，并生成后续 DTW 所需的标准化特征。
     cap = cv2.VideoCapture(video_path)
@@ -197,6 +200,7 @@ def extract_pose_sequence(
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps <= 0:
         fps = 25.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
     ok, first = cap.read()
     if not ok:
@@ -210,6 +214,10 @@ def extract_pose_sequence(
     prev_center = None
     frame_idx = 0
     frame_stride = max(1, int(frame_stride))
+    progress_start, progress_end = progress_range
+    last_reported_progress = -1
+    if progress_callback:
+        progress_callback(progress_start, progress_message)
 
     with create_pose_landmarker(task_model=task_model, num_poses=num_poses) as landmarker:
         frame = first
@@ -246,6 +254,12 @@ def extract_pose_sequence(
                     close_preview_windows()
 
             frame_idx += 1
+            if progress_callback and total_frames > 0:
+                ratio = min(1.0, frame_idx / max(1, total_frames))
+                current_progress = int(round(progress_start + (progress_end - progress_start) * ratio))
+                if current_progress >= last_reported_progress + 2 or current_progress >= progress_end:
+                    progress_callback(current_progress, progress_message)
+                    last_reported_progress = current_progress
             ok, frame = cap.read()
             if not ok:
                 break
@@ -256,6 +270,8 @@ def extract_pose_sequence(
 
     if len(points_seq) < 10:
         raise RuntimeError(f"Too few valid pose points ({len(points_seq)}) from {video_path}.")
+    if progress_callback:
+        progress_callback(progress_end, progress_message)
 
     points = np.asarray(points_seq, dtype=np.float32)
     flat = points.reshape(points.shape[0], -1)

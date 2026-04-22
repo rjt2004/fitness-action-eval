@@ -20,13 +20,13 @@ class LiveSessionStartSerializer(serializers.Serializer):
     camera_mirror = serializers.BooleanField(required=False, default=True)
     preview = serializers.BooleanField(required=False, default=False)
     export_video = serializers.BooleanField(required=False, default=False)
-    frame_stride = serializers.IntegerField(required=False, min_value=1, default=4)
-    smooth_window = serializers.IntegerField(required=False, min_value=1, default=7)
+    frame_stride = serializers.IntegerField(required=False, min_value=1, default=8)
+    smooth_window = serializers.IntegerField(required=False, min_value=1, default=3)
     score_scale = serializers.DecimalField(max_digits=6, decimal_places=2, required=False, default="8.00")
-    hint_threshold = serializers.DecimalField(max_digits=6, decimal_places=3, required=False, default="0.180")
-    hint_min_interval = serializers.IntegerField(required=False, min_value=1, default=8)
-    max_hints = serializers.IntegerField(required=False, min_value=1, default=40)
-    ref_search_window = serializers.IntegerField(required=False, min_value=10, default=20)
+    hint_threshold = serializers.DecimalField(max_digits=6, decimal_places=3, required=False, default="0.200")
+    hint_min_interval = serializers.IntegerField(required=False, min_value=1, default=6)
+    max_hints = serializers.IntegerField(required=False, min_value=1, default=60)
+    ref_search_window = serializers.IntegerField(required=False, min_value=10, default=10)
 
     def validate_template_id(self, value):
         try:
@@ -85,6 +85,7 @@ class LiveSessionDetailSerializer(LiveSessionListSerializer):
     final_part = serializers.CharField()
     error_message = serializers.CharField()
     summary_payload = serializers.SerializerMethodField()
+    runtime_payload = serializers.SerializerMethodField()
 
     class Meta(LiveSessionListSerializer.Meta):
         fields = LiveSessionListSerializer.Meta.fields + (
@@ -106,7 +107,13 @@ class LiveSessionDetailSerializer(LiveSessionListSerializer):
             "final_part",
             "error_message",
             "summary_payload",
+            "runtime_payload",
         )
 
     def get_summary_payload(self, obj: LiveSession):
         return self._load_summary_payload(obj)
+
+    def get_runtime_payload(self, obj: LiveSession):
+        from .services import get_live_session_runtime_payload
+
+        return get_live_session_runtime_payload(obj.id)

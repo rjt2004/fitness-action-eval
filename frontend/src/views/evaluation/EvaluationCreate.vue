@@ -139,8 +139,6 @@ onMounted(loadTemplates);
             </el-select>
           </el-form-item>
 
-          <el-divider content-position="left">高级参数</el-divider>
-
           <el-form-item label="抽帧步长">
             <el-input-number v-model="form.frame_stride" :min="1" :max="10" />
           </el-form-item>

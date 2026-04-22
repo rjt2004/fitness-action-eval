@@ -14,16 +14,15 @@ from apps.accounts.permissions import IsAdminRole
 from .models import ActionCategory, TemplateVideo
 from .serializers import (
     ActionCategorySerializer,
-    TemplateBuildSerializer,
     TemplateUploadSerializer,
     TemplateVideoDetailSerializer,
     TemplateVideoListSerializer,
 )
 from .services import (
-    build_template_file,
     delete_template_bundle,
     ensure_default_baduanjin_category,
     register_source_asset,
+    start_template_build,
 )
 
 
@@ -71,7 +70,8 @@ def template_upload_view(request):
         )
         register_source_asset(template)
 
-    return api_success(data=TemplateVideoDetailSerializer(template).data, message="模板上传成功", status_code=201)
+    template = start_template_build(template)
+    return api_success(data=TemplateVideoDetailSerializer(template).data, message="模板已上传，正在生成", status_code=201)
 
 
 @api_view(["GET"])
@@ -81,39 +81,12 @@ def template_detail_view(request, template_id: int):
     return api_success(data=TemplateVideoDetailSerializer(template).data, message="获取模板详情成功")
 
 
-@api_view(["POST"])
-@permission_classes([IsAuthenticated, IsAdminRole])
-def template_build_view(request, template_id: int):
-    template = get_object_or_404(TemplateVideo, id=template_id)
-    serializer = TemplateBuildSerializer(data=request.data)
-    if not serializer.is_valid():
-        return api_error(message="模板生成参数错误", data=serializer.errors, status_code=400)
-
-    validated = serializer.validated_data
-    changed_fields = []
-    if "frame_stride" in validated:
-        template.frame_stride = validated["frame_stride"]
-        changed_fields.append("frame_stride")
-    if "smooth_window" in validated:
-        template.smooth_window = validated["smooth_window"]
-        changed_fields.append("smooth_window")
-    if changed_fields:
-        changed_fields.append("updated_at")
-        template.save(update_fields=changed_fields)
-
-    try:
-        build_template_file(template)
-    except Exception as exc:
-        return api_error(message="模板生成失败", data={"detail": str(exc)}, status_code=500)
-
-    template.refresh_from_db()
-    return api_success(data=TemplateVideoDetailSerializer(template).data, message="模板生成成功")
-
-
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated, IsAdminRole])
 def template_delete_view(request, template_id: int):
     template = get_object_or_404(TemplateVideo, id=template_id)
+    if template.status == TemplateVideo.Status.BUILDING:
+        return api_error(message="模板正在生成中，请生成结束后再删除", status_code=400)
     template_name = template.template_name
     try:
         delete_template_bundle(template)

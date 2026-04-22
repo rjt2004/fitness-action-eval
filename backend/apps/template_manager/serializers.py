@@ -30,6 +30,8 @@ class TemplateVideoListSerializer(serializers.ModelSerializer):
             "template_name",
             "version",
             "status",
+            "progress_percent",
+            "progress_text",
             "frame_stride",
             "smooth_window",
             "template_file_path",
@@ -84,8 +86,3 @@ class TemplateUploadSerializer(serializers.Serializer):
         if not ActionCategory.objects.filter(id=value, is_active=True).exists():
             raise serializers.ValidationError("动作类别不存在或已禁用。")
         return value
-
-
-class TemplateBuildSerializer(serializers.Serializer):
-    frame_stride = serializers.IntegerField(required=False, min_value=1)
-    smooth_window = serializers.IntegerField(required=False, min_value=1)

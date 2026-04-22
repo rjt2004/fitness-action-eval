@@ -14,10 +14,6 @@ export function uploadTemplate(formData) {
   });
 }
 
-export function buildTemplate(id) {
-  return request.post(`/api/template-center/templates/${id}/build/`);
-}
-
 export function deleteTemplate(id) {
   return request.delete(`/api/template-center/templates/${id}/delete/`);
 }

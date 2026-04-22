@@ -87,6 +87,14 @@ def _update_preview_frame(session_id: int, frame) -> None:
         entry["last_frame_at"] = time.perf_counter()
 
 
+def _update_runtime_state(session_id: int, state: dict) -> None:
+    with _REGISTRY_LOCK:
+        entry = _SESSION_REGISTRY.get(session_id)
+        if entry is None:
+            return
+        entry["latest_state"] = dict(state)
+
+
 def _run_live_session_worker(session_id: int, stop_event: threading.Event, pause_event: threading.Event) -> None:
     close_old_connections()
     try:
@@ -131,6 +139,7 @@ def _run_live_session_worker(session_id: int, stop_event: threading.Event, pause
             stop_checker=stop_event.is_set,
             pause_checker=pause_event.is_set,
             frame_callback=lambda frame: _update_preview_frame(session_id, frame),
+            state_callback=lambda state: _update_runtime_state(session_id, state),
         )
         output_video = ""
         raw_output_video = str(summary.get("output_video") or "")
@@ -171,6 +180,7 @@ def start_live_session(session: LiveSession) -> LiveSession:
             "pause_event": pause_event,
             "latest_frame": b"",
             "last_frame_at": 0.0,
+            "latest_state": {},
         }
     thread.start()
     return session
@@ -262,6 +272,15 @@ def get_live_session_preview_frame(session_id: int) -> bytes:
             return b""
         frame = entry.get("latest_frame", b"")
     return frame if isinstance(frame, bytes) else b""
+
+
+def get_live_session_runtime_payload(session_id: int) -> dict:
+    with _REGISTRY_LOCK:
+        entry = _SESSION_REGISTRY.get(session_id)
+        if not entry:
+            return {}
+        state = entry.get("latest_state", {})
+    return dict(state) if isinstance(state, dict) else {}
 
 
 def _safe_remove_path(path_str: str) -> None:

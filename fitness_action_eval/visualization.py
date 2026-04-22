@@ -248,18 +248,7 @@ def compose_live_query_frame(
     phase_name: str = "",
     phase_cue: str = "",
 ) -> np.ndarray:
-    canvas = qry_frame.copy()
-    lines = [f"当前得分：{score:.1f}/100"]
-    if np.isfinite(current_local_err):
-        lines.append(f"局部偏差：{current_local_err:.3f}")
-    if phase_name:
-        lines.append(f"当前动作：{phase_name}")
-    if phase_cue:
-        lines.append(f"动作要领：{phase_cue}")
-    if active_hint:
-        lines.append(f"实时提示：{active_hint}")
-    draw_text_block(canvas, lines, x=20, y=18)
-    return canvas
+    return qry_frame.copy()
 
 
 def save_plot(

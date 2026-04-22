@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from django.conf import settings
+from django.db import close_old_connections
 from django.db import transaction
+from django.utils import timezone
 
 from fitness_action_eval.pipeline import save_pose_template
 
 from .models import ActionCategory, FileAsset, TemplateVideo
+
+_TEMPLATE_BUILD_REGISTRY: dict[int, dict[str, object]] = {}
+_TEMPLATE_BUILD_LOCK = threading.Lock()
 
 
 def ensure_default_baduanjin_category() -> ActionCategory:
@@ -47,7 +53,15 @@ def register_source_asset(template: TemplateVideo) -> FileAsset:
     )
 
 
-def build_template_file(template: TemplateVideo) -> TemplateVideo:
+def _update_template_progress(template_id: int, percent: int, text: str) -> None:
+    TemplateVideo.objects.filter(id=template_id).update(
+        progress_percent=max(0, min(100, int(percent))),
+        progress_text=str(text),
+        updated_at=timezone.now(),
+    )
+
+
+def build_template_file(template: TemplateVideo, progress_callback=None) -> TemplateVideo:
     generated_dir = Path(settings.MEDIA_ROOT) / "template_center" / "generated"
     generated_dir.mkdir(parents=True, exist_ok=True)
     output_path = generated_dir / f"template_{template.id}_{template.version}.npz"
@@ -61,11 +75,14 @@ def build_template_file(template: TemplateVideo) -> TemplateVideo:
             template_path=str(output_path),
             frame_stride=template.frame_stride,
             preview=False,
+            progress_callback=progress_callback,
         )
         template.template_file_path = str(output_path)
         template.status = TemplateVideo.Status.READY
+        template.progress_percent = 100
+        template.progress_text = "模板生成完成"
         template.build_error = ""
-        template.save(update_fields=["template_file_path", "status", "build_error", "updated_at"])
+        template.save(update_fields=["template_file_path", "status", "progress_percent", "progress_text", "build_error", "updated_at"])
 
         FileAsset.objects.update_or_create(
             biz_type=FileAsset.BizType.TEMPLATE_FILE,
@@ -79,9 +96,56 @@ def build_template_file(template: TemplateVideo) -> TemplateVideo:
         )
     except Exception as exc:
         template.status = TemplateVideo.Status.FAILED
+        template.progress_percent = 100
+        template.progress_text = "模板生成失败"
         template.build_error = str(exc)
-        template.save(update_fields=["status", "build_error", "updated_at"])
+        template.save(update_fields=["status", "progress_percent", "progress_text", "build_error", "updated_at"])
         raise
+    return template
+
+
+def _run_template_build_worker(template_id: int) -> None:
+    close_old_connections()
+    try:
+        template = TemplateVideo.objects.get(id=template_id)
+        build_template_file(
+            template,
+            progress_callback=lambda percent, text: _update_template_progress(template_id, percent, text),
+        )
+    except TemplateVideo.DoesNotExist:
+        pass
+    except Exception as exc:
+        TemplateVideo.objects.filter(id=template_id).update(
+            status=TemplateVideo.Status.FAILED,
+            progress_percent=100,
+            progress_text="模板生成失败",
+            build_error=str(exc),
+            updated_at=timezone.now(),
+        )
+    finally:
+        with _TEMPLATE_BUILD_LOCK:
+            _TEMPLATE_BUILD_REGISTRY.pop(template_id, None)
+        close_old_connections()
+
+
+def start_template_build(template: TemplateVideo) -> TemplateVideo:
+    TemplateVideo.objects.filter(id=template.id).update(
+        status=TemplateVideo.Status.BUILDING,
+        progress_percent=0,
+        progress_text="等待生成模板",
+        build_error="",
+        updated_at=timezone.now(),
+    )
+    thread = threading.Thread(
+        target=_run_template_build_worker,
+        args=(template.id,),
+        name=f"template-build-{template.id}",
+        daemon=True,
+    )
+    with _TEMPLATE_BUILD_LOCK:
+        _TEMPLATE_BUILD_REGISTRY[template.id] = {"thread": thread}
+    thread.start()
+    template.refresh_from_db()
     return template
 
 

@@ -24,6 +24,7 @@ class ActionCategory(models.Model):
 class TemplateVideo(models.Model):
     class Status(models.TextChoices):
         DRAFT = "draft", "草稿"
+        BUILDING = "building", "生成中"
         READY = "ready", "已生成"
         FAILED = "failed", "生成失败"
 
@@ -36,6 +37,8 @@ class TemplateVideo(models.Model):
     frame_stride = models.PositiveIntegerField(default=4, verbose_name="抽帧步长")
     smooth_window = models.PositiveIntegerField(default=7, verbose_name="平滑窗口")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT, verbose_name="状态")
+    progress_percent = models.PositiveIntegerField(default=0, verbose_name="进度百分比")
+    progress_text = models.CharField(max_length=100, blank=True, default="", verbose_name="进度文本")
     build_error = models.TextField(blank=True, default="", verbose_name="生成错误")
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
