@@ -125,6 +125,10 @@ onBeforeUnmount(clearPolling);
               <div class="task-info-item__value">{{ detail?.smooth_window ?? "--" }}</div>
             </div>
             <div class="task-info-item">
+              <div class="task-info-item__label">姿态模型</div>
+              <div class="task-info-item__value">{{ detail?.pose_model_label || detail?.pose_model || "--" }}</div>
+            </div>
+            <div class="task-info-item">
               <div class="task-info-item__label">提示阈值</div>
               <div class="task-info-item__value">{{ detail?.hint_threshold ?? "--" }}</div>
             </div>

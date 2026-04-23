@@ -65,6 +65,7 @@ def build_live_feedback(
     qry_points: np.ndarray,
     hint_threshold: float,
     phase_id: Optional[int] = None,
+    substage_key: Optional[str] = None,
     ref_angles: Optional[np.ndarray] = None,
     qry_angles: Optional[np.ndarray] = None,
 ) -> Tuple[str, float, Optional[str]]:
@@ -91,7 +92,7 @@ def build_live_feedback(
     if best_info["score"] < effective_threshold:
         return "", point_err, best_part
 
-    message = build_baduanjin_hint_text(phase_id=phase_id, part=best_part, dx=best_info["dx"], dy=best_info["dy"])
+    message = build_baduanjin_hint_text(phase_id=phase_id, part=best_part, dx=best_info["dx"], dy=best_info["dy"], substage_key=substage_key)
     return message, point_err, best_part
 
 
@@ -104,6 +105,9 @@ def build_feedback(
     max_hints: int,
     ref_phase_ids: Optional[np.ndarray] = None,
     qry_phase_ids: Optional[np.ndarray] = None,
+    ref_substage_keys: Optional[np.ndarray] = None,
+    ref_substage_names: Optional[np.ndarray] = None,
+    ref_substage_cues: Optional[np.ndarray] = None,
     ref_angles: Optional[np.ndarray] = None,
     qry_angles: Optional[np.ndarray] = None,
 ) -> Tuple[List[Dict[str, Any]], np.ndarray]:
@@ -116,6 +120,9 @@ def build_feedback(
 
     for i, j in path:
         phase_id = int(ref_phase_ids[i]) if ref_phase_ids is not None else None
+        substage_key = str(ref_substage_keys[i]) if ref_substage_keys is not None else None
+        substage_name = str(ref_substage_names[i]) if ref_substage_names is not None else ""
+        substage_cue = str(ref_substage_cues[i]) if ref_substage_cues is not None else ""
         p_err = part_errors(
             ref_pts=ref_points[i],
             qry_pts=qry_points[j],
@@ -152,8 +159,11 @@ def build_feedback(
                 "query_index": int(j),
                 "query_phase_id": int(qry_phase_ids[j]) if qry_phase_ids is not None else None,
                 "phase_id": int(phase_id) if phase_id is not None else None,
-                "phase_name": phase.display_name if phase is not None else "通用动作",
-                "cue": phase.cue if phase is not None else "",
+                "phase_name": f"{phase.display_name} - {substage_name}" if phase is not None and substage_name else (phase.display_name if phase is not None else "通用动作"),
+                "cue": substage_cue or (phase.cue if phase is not None else ""),
+                "substage_key": substage_key,
+                "substage_name": substage_name,
+                "substage_cue": substage_cue,
                 "part": part,
                 "part_error": float(info["score"]),
                 "point_error": float(info["point_error"]),
@@ -163,6 +173,7 @@ def build_feedback(
                     part=part,
                     dx=float(info["dx"]),
                     dy=float(info["dy"]),
+                    substage_key=substage_key,
                 ),
             }
         )

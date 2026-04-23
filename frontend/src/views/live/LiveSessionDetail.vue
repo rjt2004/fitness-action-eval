@@ -2,7 +2,6 @@
 import { computed, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 import { getLiveSessionDetail } from "@/api/liveSession";
-import VideoPlayer from "@/components/VideoPlayer.vue";
 
 const route = useRoute();
 const loading = ref(false);
@@ -17,6 +16,7 @@ function toMediaUrl(path) {
 }
 
 const hintItems = computed(() => detail.value?.summary_payload?.hints || []);
+const errorFrameItems = computed(() => detail.value?.summary_payload?.error_frames || []);
 
 async function loadData() {
   loading.value = true;
@@ -37,8 +37,33 @@ onMounted(loadData);
     <el-skeleton :loading="loading" animated :rows="10">
       <template #default>
         <section class="soft-card detail-panel">
-          <h3 class="section-title">参考动作与实时结果视频</h3>
-          <VideoPlayer :path="detail?.output_video_path" />
+          <h3 class="section-title">错误动作帧</h3>
+          <div v-if="errorFrameItems.length" class="error-frame-grid">
+            <article
+              v-for="(item, index) in errorFrameItems"
+              :key="`${item.query_time_s}-${index}`"
+              class="error-frame-card"
+            >
+              <el-image
+                class="error-frame-card__image"
+                :src="toMediaUrl(item.image_path)"
+                :preview-src-list="errorFrameItems.map((frame) => toMediaUrl(frame.image_path))"
+                :initial-index="index"
+                fit="contain"
+                preview-teleported
+              />
+              <div class="error-frame-card__body">
+                <div class="error-frame-card__meta">
+                  <span>{{ Number(item.query_time_s || 0).toFixed(1) }}s</span>
+                  <span>{{ item.phase_name || "--" }}</span>
+                  <span>{{ item.part || "--" }}</span>
+                  <span>偏差 {{ item.local_error !== undefined ? Number(item.local_error).toFixed(3) : "--" }}</span>
+                </div>
+                <div class="error-frame-card__message">{{ item.message }}</div>
+              </div>
+            </article>
+          </div>
+          <el-empty v-else description="本次会话暂无保存的错误动作帧" />
         </section>
 
         <section class="soft-card detail-panel" style="margin-top: 20px">
@@ -71,6 +96,10 @@ onMounted(loadData);
             <div class="task-info-item">
               <div class="task-info-item__label">平滑窗口</div>
               <div class="task-info-item__value">{{ detail?.smooth_window ?? "--" }}</div>
+            </div>
+            <div class="task-info-item">
+              <div class="task-info-item__label">姿态模型</div>
+              <div class="task-info-item__value">{{ detail?.pose_model_label || detail?.pose_model || "--" }}</div>
             </div>
             <div class="task-info-item">
               <div class="task-info-item__label">提示阈值</div>
@@ -113,6 +142,45 @@ onMounted(loadData);
 <style scoped>
 .detail-panel {
   padding: 22px;
+}
+
+.error-frame-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.error-frame-card {
+  overflow: hidden;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 18px;
+  background: #ffffff;
+}
+
+.error-frame-card__image {
+  display: block;
+  width: 100%;
+  min-height: 220px;
+  background: #050505;
+}
+
+.error-frame-card__body {
+  padding: 14px 16px 16px;
+}
+
+.error-frame-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.error-frame-card__message {
+  margin-top: 8px;
+  color: #0f172a;
+  font-weight: 700;
+  line-height: 1.7;
 }
 
 .task-info-grid {
@@ -171,6 +239,7 @@ onMounted(loadData);
 }
 
 @media (max-width: 1200px) {
+  .error-frame-grid,
   .task-info-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

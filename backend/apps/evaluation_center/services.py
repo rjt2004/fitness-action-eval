@@ -7,11 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
+import cv2
 from django.conf import settings
 from django.db import close_old_connections
 
 from apps.template_manager.models import FileAsset
 from config.video_utils import transcode_to_browser_mp4
+from fitness_action_eval.model_options import FOLLOW_TEMPLATE_MODEL_KEY, resolve_pose_model_path
 from fitness_action_eval.pipeline import run_dtw_scoring_from_template
 
 from .models import EvaluationHint, EvaluationPhaseResult, EvaluationTask
@@ -62,7 +64,10 @@ def _prepare_result_video(out_video_raw: Path, out_video_web: Path) -> Path:
         transcode_to_browser_mp4(str(out_video_raw), str(out_video_web))
         return out_video_web if out_video_web.exists() else out_video_raw
     except Exception:
-        return out_video_raw
+        cap = cv2.VideoCapture(str(out_video_raw))
+        is_readable = cap.isOpened() and int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) > 0
+        cap.release()
+        return out_video_raw if is_readable else out_video_web
 
 
 def register_evaluation_asset(task: EvaluationTask, biz_type: str, file_path: str) -> None:
@@ -242,6 +247,7 @@ def _run_evaluation_task_worker(task_id: int) -> None:
             max_hints=int(task.max_hints),
             query_frame_stride=int(task.frame_stride),
             query_smooth_window=int(task.smooth_window),
+            query_task_model=None if task.pose_model == FOLLOW_TEMPLATE_MODEL_KEY else resolve_pose_model_path(task.pose_model),
             progress_callback=lambda percent, text: _update_progress(task_id, percent, text),
         )
         if task.export_video:

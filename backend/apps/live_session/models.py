@@ -4,6 +4,7 @@ from django.conf import settings
 from django.db import models
 
 from apps.template_manager.models import TemplateVideo
+from fitness_action_eval.model_options import get_pose_model_choices
 
 
 class LiveSession(models.Model):
@@ -35,13 +36,16 @@ class LiveSession(models.Model):
     camera_mirror = models.BooleanField(default=True, verbose_name="是否镜像")
     preview = models.BooleanField(default=False, verbose_name="是否本地预览")
     export_video = models.BooleanField(default=False, verbose_name="是否导出视频")
-    frame_stride = models.PositiveIntegerField(default=8, verbose_name="抽帧步长")
-    smooth_window = models.PositiveIntegerField(default=3, verbose_name="平滑窗口")
+    capture_error_frames = models.BooleanField(default=True, verbose_name="是否保存错误动作帧")
+    error_frame_count = models.PositiveIntegerField(default=0, verbose_name="错误动作帧数量")
+    frame_stride = models.PositiveIntegerField(default=1, verbose_name="抽帧步长")
+    smooth_window = models.PositiveIntegerField(default=1, verbose_name="平滑窗口")
+    pose_model = models.CharField(max_length=20, choices=get_pose_model_choices(include_follow_template=True), default="lite", verbose_name="姿态模型")
     score_scale = models.DecimalField(max_digits=6, decimal_places=2, default=8.00, verbose_name="评分尺度")
     hint_threshold = models.DecimalField(max_digits=6, decimal_places=3, default=0.200, verbose_name="提示阈值")
-    hint_min_interval = models.PositiveIntegerField(default=6, verbose_name="提示最小间隔")
-    max_hints = models.PositiveIntegerField(default=60, verbose_name="提示上限")
-    ref_search_window = models.PositiveIntegerField(default=10, verbose_name="模板搜索窗口")
+    hint_min_interval = models.PositiveIntegerField(default=60, verbose_name="提示最小间隔")
+    max_hints = models.PositiveIntegerField(default=360, verbose_name="提示上限")
+    ref_search_window = models.PositiveIntegerField(default=60, verbose_name="模板搜索窗口")
     max_frames = models.PositiveIntegerField(null=True, blank=True, verbose_name="最大处理帧数")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, verbose_name="状态")
     summary_json_path = models.CharField(max_length=255, blank=True, default="", verbose_name="摘要 JSON 路径")

@@ -3,6 +3,7 @@ from __future__ import annotations
 from rest_framework import serializers
 
 from fitness_action_eval.baduanjin import BADUANJIN_PHASES
+from fitness_action_eval.model_options import DEFAULT_TEMPLATE_MODEL_KEY, POSE_MODEL_OPTIONS, get_pose_model_label, normalize_pose_model_key
 
 from .models import ActionCategory, FileAsset, TemplateVideo
 
@@ -22,6 +23,7 @@ class FileAssetSerializer(serializers.ModelSerializer):
 class TemplateVideoListSerializer(serializers.ModelSerializer):
     category = ActionCategorySerializer(read_only=True)
     created_by_name = serializers.CharField(source="created_by.username", read_only=True)
+    pose_model_label = serializers.SerializerMethodField()
 
     class Meta:
         model = TemplateVideo
@@ -34,6 +36,8 @@ class TemplateVideoListSerializer(serializers.ModelSerializer):
             "progress_text",
             "frame_stride",
             "smooth_window",
+            "pose_model",
+            "pose_model_label",
             "template_file_path",
             "cover_image_path",
             "build_error",
@@ -42,6 +46,9 @@ class TemplateVideoListSerializer(serializers.ModelSerializer):
             "category",
             "created_by_name",
         )
+
+    def get_pose_model_label(self, obj: TemplateVideo) -> str:
+        return get_pose_model_label(obj.pose_model)
 
 
 class TemplateVideoDetailSerializer(TemplateVideoListSerializer):
@@ -81,8 +88,12 @@ class TemplateUploadSerializer(serializers.Serializer):
     source_video = serializers.FileField()
     frame_stride = serializers.IntegerField(required=False, default=4, min_value=1)
     smooth_window = serializers.IntegerField(required=False, default=7, min_value=1)
+    pose_model = serializers.ChoiceField(choices=tuple(POSE_MODEL_OPTIONS.keys()), required=False, default=DEFAULT_TEMPLATE_MODEL_KEY)
 
     def validate_category_id(self, value):
         if not ActionCategory.objects.filter(id=value, is_active=True).exists():
             raise serializers.ValidationError("动作类别不存在或已禁用。")
         return value
+
+    def validate_pose_model(self, value: str) -> str:
+        return normalize_pose_model_key(value, default=DEFAULT_TEMPLATE_MODEL_KEY)

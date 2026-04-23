@@ -9,6 +9,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from fitness_action_eval.pipeline import save_pose_template
+from fitness_action_eval.model_options import resolve_pose_model_path
 
 from .models import ActionCategory, FileAsset, TemplateVideo
 
@@ -69,7 +70,7 @@ def build_template_file(template: TemplateVideo, progress_callback=None) -> Temp
     try:
         save_pose_template(
             ref_video=template.source_video.path,
-            task_model=settings.FITNESS_ACTION_EVAL["MODEL_PATH"],
+            task_model=resolve_pose_model_path(template.pose_model),
             num_poses=1,
             smooth_window=template.smooth_window,
             template_path=str(output_path),

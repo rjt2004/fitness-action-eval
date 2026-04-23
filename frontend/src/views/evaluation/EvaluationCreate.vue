@@ -3,6 +3,7 @@ import { onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { createEvaluationTask } from "@/api/evaluation";
+import { getPoseModelOptions } from "@/api/system";
 import { getTemplateDetail, getTemplateList } from "@/api/template";
 
 const router = useRouter();
@@ -10,6 +11,7 @@ const loading = ref(false);
 const templateLoading = ref(false);
 const templates = ref([]);
 const selectedTemplate = ref(null);
+const poseModelOptions = ref([]);
 const queryVideo = ref(null);
 
 const form = reactive({
@@ -17,11 +19,16 @@ const form = reactive({
   task_name: "离线评估任务",
   frame_stride: 6,
   smooth_window: 3,
+  pose_model: "follow_template",
   hint_threshold: 0.2,
   hint_min_interval: 12,
   max_hints: 24,
   export_video: false,
 });
+
+const runtimeModelOptions = [
+  { value: "follow_template", label: "跟随模板模型" },
+];
 
 function toMediaUrl(path) {
   if (!path) return "";
@@ -39,6 +46,10 @@ async function loadTemplates() {
   }
 }
 
+async function loadPoseModelOptions() {
+  poseModelOptions.value = await getPoseModelOptions();
+}
+
 async function loadTemplateDetail(templateId) {
   if (!templateId) {
     selectedTemplate.value = null;
@@ -50,6 +61,7 @@ async function loadTemplateDetail(templateId) {
     if (selectedTemplate.value) {
       form.frame_stride = Math.max(selectedTemplate.value.frame_stride || 4, 6);
       form.smooth_window = Math.min(selectedTemplate.value.smooth_window || 5, 3);
+      form.pose_model = "follow_template";
     }
   } finally {
     templateLoading.value = false;
@@ -71,6 +83,7 @@ async function handleSubmit() {
   payload.append("task_name", form.task_name);
   payload.append("frame_stride", String(form.frame_stride));
   payload.append("smooth_window", String(form.smooth_window));
+  payload.append("pose_model", form.pose_model);
   payload.append("hint_threshold", String(form.hint_threshold));
   payload.append("hint_min_interval", String(form.hint_min_interval));
   payload.append("max_hints", String(form.max_hints));
@@ -94,7 +107,10 @@ watch(
   },
 );
 
-onMounted(loadTemplates);
+onMounted(() => {
+  loadPoseModelOptions();
+  loadTemplates();
+});
 </script>
 
 <template>
@@ -116,8 +132,9 @@ onMounted(loadTemplates);
 
           <div v-if="selectedTemplate" class="template-meta">
             <div><strong>模板名称：</strong>{{ selectedTemplate.template_name }}</div>
-            <div><strong>当前模板抽帧：</strong>{{ selectedTemplate.frame_stride }}</div>
-            <div><strong>当前模板平滑：</strong>{{ selectedTemplate.smooth_window }}</div>
+            <div><strong>模板姿态模型：</strong>{{ selectedTemplate.pose_model_label || selectedTemplate.pose_model }}</div>
+            <div><strong>模板抽帧：</strong>{{ selectedTemplate.frame_stride }}</div>
+            <div><strong>模板平滑：</strong>{{ selectedTemplate.smooth_window }}</div>
           </div>
         </div>
       </section>
@@ -138,7 +155,16 @@ onMounted(loadTemplates);
               />
             </el-select>
           </el-form-item>
-
+          <el-form-item label="姿态模型">
+            <el-select v-model="form.pose_model" style="width: 100%">
+              <el-option
+                v-for="item in [...runtimeModelOptions, ...poseModelOptions]"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </el-form-item>
           <el-form-item label="抽帧步长">
             <el-input-number v-model="form.frame_stride" :min="1" :max="10" />
           </el-form-item>
@@ -157,7 +183,6 @@ onMounted(loadTemplates);
           <el-form-item label="导出对比视频">
             <el-switch v-model="form.export_video" />
           </el-form-item>
-
           <el-form-item label="待测视频">
             <el-upload :auto-upload="false" :limit="1" :on-change="handleFileChange">
               <el-button type="primary" plain>选择视频文件</el-button>

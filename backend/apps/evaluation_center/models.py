@@ -4,6 +4,7 @@ from django.conf import settings
 from django.db import models
 
 from apps.template_manager.models import TemplateVideo
+from fitness_action_eval.model_options import DEFAULT_RUNTIME_MODEL_KEY, get_pose_model_choices
 
 
 class EvaluationTask(models.Model):
@@ -42,6 +43,7 @@ class EvaluationTask(models.Model):
     score_scale = models.DecimalField(max_digits=6, decimal_places=2, default=8.00, verbose_name="评分尺度")
     frame_stride = models.PositiveIntegerField(default=1, verbose_name="待测视频抽帧步长")
     smooth_window = models.PositiveIntegerField(default=5, verbose_name="待测视频平滑窗口")
+    pose_model = models.CharField(max_length=20, choices=get_pose_model_choices(include_follow_template=True), default=DEFAULT_RUNTIME_MODEL_KEY, verbose_name="姿态模型")
     progress_percent = models.PositiveIntegerField(default=0, verbose_name="进度百分比")
     progress_text = models.CharField(max_length=100, blank=True, default="", verbose_name="进度文本")
     error_message = models.TextField(blank=True, default="", verbose_name="错误信息")

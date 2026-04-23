@@ -13,7 +13,10 @@ import numpy as np
 from fitness_action_eval.baduanjin import (
     apply_phase_feature_weights,
     build_phase_ids,
+    build_substage_metadata,
     get_phase_definition,
+    get_substage_definition,
+    get_substage_by_key,
     phase_metadata_rows,
     weight_single_feature,
 )
@@ -29,6 +32,7 @@ from fitness_action_eval.pose import (
 from fitness_action_eval.visualization import (
     close_preview_windows,
     compose_compare_frame,
+    compose_error_frame,
     compose_live_query_frame,
     draw_pose_skeleton,
     draw_text_block,
@@ -63,6 +67,12 @@ def _ensure_baduanjin_features(data: Dict[str, Any]) -> Dict[str, Any]:
     ).astype(np.int32)
 
     data["phase_rows"] = phase_metadata_rows(data["phase_ids"], data["time_s"])
+    state_points = data.get("raw_points", data["points"])
+    substage_metadata = build_substage_metadata(data["phase_ids"], data["time_s"], points=state_points)
+    data["substage_keys"] = substage_metadata["keys"]
+    data["substage_names"] = substage_metadata["names"]
+    data["substage_cues"] = substage_metadata["cues"]
+    data["substage_rows"] = substage_metadata["rows"]
     data["features"] = apply_phase_feature_weights(data["base_features"], data["phase_ids"])
     return data
 
@@ -81,6 +91,9 @@ def _template_payload(ref_video: str, task_model: str, num_poses: int, smooth_wi
         "feature_mean": ref_data["feature_mean"],
         "feature_std": ref_data["feature_std"],
         "phase_ids": ref_data["phase_ids"],
+        "substage_keys": ref_data["substage_keys"],
+        "substage_names": ref_data["substage_names"],
+        "substage_cues": ref_data["substage_cues"],
         "points": ref_data["points"],
         "raw_points": ref_data["raw_points"],
         "frame_indices": ref_data["frame_indices"],
@@ -177,6 +190,9 @@ def load_pose_template(template_path: str) -> Dict[str, Any]:
             "feature_mean": data["feature_mean"] if "feature_mean" in data else None,
             "feature_std": data["feature_std"] if "feature_std" in data else None,
             "phase_ids": data["phase_ids"] if "phase_ids" in data else None,
+            "substage_keys": data["substage_keys"] if "substage_keys" in data else None,
+            "substage_names": data["substage_names"] if "substage_names" in data else None,
+            "substage_cues": data["substage_cues"] if "substage_cues" in data else None,
             "points": data["points"],
             "raw_points": data["raw_points"],
             "frame_indices": data["frame_indices"],
@@ -228,6 +244,9 @@ def finalize_scoring_outputs(
         max_hints=max_hints,
         ref_phase_ids=ref_data["phase_ids"],
         qry_phase_ids=qry_data["phase_ids"],
+        ref_substage_keys=ref_data.get("substage_keys"),
+        ref_substage_names=ref_data.get("substage_names"),
+        ref_substage_cues=ref_data.get("substage_cues"),
         ref_angles=ref_data["angle_features"],
         qry_angles=qry_data["angle_features"],
     )
@@ -270,6 +289,8 @@ def finalize_scoring_outputs(
         "hint_count": int(len(hints)),
         "reference_phases": ref_data["phase_rows"],
         "query_phases": qry_data["phase_rows"],
+        "reference_substages": ref_data.get("substage_rows", []),
+        "query_substages": qry_data.get("substage_rows", []),
         "phase_plots": phase_plots,
         "hints": hints,
     }
@@ -422,6 +443,7 @@ def run_dtw_scoring_from_template(
     max_hints: int = 40,
     query_frame_stride: Optional[int] = None,
     query_smooth_window: Optional[int] = None,
+    query_task_model: Optional[str] = None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, Any]:
     # 直接加载模板并只处理待测视频，适合重复评分场景。
@@ -430,7 +452,7 @@ def run_dtw_scoring_from_template(
         progress_callback(12, "模板已加载，正在提取待测视频姿态")
     qry_data = extract_pose_sequence(
         video_path=query_video,
-        task_model=ref_data["task_model"],
+        task_model=query_task_model or ref_data["task_model"],
         num_poses=max(1, ref_data["num_poses"]),
         smooth_window=max(1, int(query_smooth_window or ref_data["smooth_window"])),
         frame_stride=max(1, int(query_frame_stride or ref_data.get("frame_stride", 1))),
@@ -514,6 +536,15 @@ def _resolve_capture_source(source: Union[int, str]) -> Union[int, str]:
         return str(source)
 
 
+def _is_video_file_source(source: Union[int, str]) -> bool:
+    if isinstance(source, int):
+        return False
+    text = str(source).strip()
+    if text.isdigit():
+        return False
+    return Path(text).suffix.lower() in {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".m4v", ".webm"}
+
+
 def run_camera_coach(
     template_path: Optional[str],
     ref_video: Optional[str],
@@ -527,11 +558,13 @@ def run_camera_coach(
     max_hints: int,
     ref_search_window: int,
     frame_stride: int = 1,
+    camera_task_model: Optional[str] = None,
     camera_width: Optional[int] = None,
     camera_height: Optional[int] = None,
     camera_mirror: bool = True,
     out_json: Optional[str] = None,
     out_video: Optional[str] = None,
+    out_error_frames_dir: Optional[str] = None,
     preview: bool = True,
     max_frames: Optional[int] = None,
     stop_checker: Optional[Callable[[], bool]] = None,
@@ -549,6 +582,7 @@ def run_camera_coach(
         frame_stride=frame_stride,
     )
     ref_video_path = ref_data["reference_video"]
+    live_task_model = camera_task_model or ref_data["task_model"]
 
     cap = cv2.VideoCapture(_resolve_capture_source(camera_source))
     if not cap.isOpened():
@@ -561,9 +595,11 @@ def run_camera_coach(
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps <= 0 or fps > 120:
         fps = 30.0
+    total_capture_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
     record_compare_video = bool(out_video)
-    ref_cap = cv2.VideoCapture(ref_video_path) if record_compare_video and ref_video_path else None
+    record_error_frames = bool(out_error_frames_dir)
+    ref_cap = cv2.VideoCapture(ref_video_path) if (record_compare_video or record_error_frames) and ref_video_path else None
     if ref_cap is not None and not ref_cap.isOpened():
         cap.release()
         raise FileNotFoundError(f"Cannot open video: {ref_video_path}")
@@ -573,6 +609,8 @@ def run_camera_coach(
     actual_out_video = out_video
     if out_video:
         ensure_parent_dir(out_video)
+    if out_error_frames_dir:
+        Path(out_error_frames_dir).mkdir(parents=True, exist_ok=True)
 
     current_ref_seq_idx = 0
     current_ref_frame_idx = -1
@@ -585,17 +623,23 @@ def run_camera_coach(
     keep_frames = max(1, int(round(fps * 0.8)))
     running_scores: list[float] = []
     live_hints: list[dict[str, Any]] = []
+    error_frames: list[dict[str, Any]] = []
+    saved_error_keys: set[str] = set()
     processed_idx = 0
     last_hint_processed_idx = -10**9
     latest_phase_name = ""
     latest_phase_cue = ""
+    latest_substage_key = ""
+    latest_substage_name = ""
+    latest_substage_cue = ""
     latest_local_err = float("nan")
     latest_part = ""
     ref_times = np.asarray(ref_data.get("time_s"), dtype=np.float32)
     ref_length = int(ref_data["features"].shape[0])
     session_start_time = time.perf_counter()
+    use_video_timeline = _is_video_file_source(camera_source)
 
-    with create_pose_landmarker(task_model=ref_data["task_model"], num_poses=ref_data["num_poses"]) as landmarker:
+    with create_pose_landmarker(task_model=live_task_model, num_poses=ref_data["num_poses"]) as landmarker:
         while True:
             if stop_checker is not None and stop_checker():
                 break
@@ -607,9 +651,26 @@ def run_camera_coach(
                 break
             if max_frames is not None and frame_idx >= max_frames:
                 break
+            if use_video_timeline:
+                # A file used as a virtual camera should behave like a real-time source:
+                # never play faster than wall clock, and skip stale frames instead of
+                # building a delayed processing backlog.
+                wall_elapsed_s = time.perf_counter() - session_start_time
+                target_capture_frame = int(wall_elapsed_s * fps)
+                if total_capture_frames > 0:
+                    target_capture_frame = min(target_capture_frame, total_capture_frames - 1)
+                while frame_idx + capture_stride < target_capture_frame:
+                    if not cap.grab():
+                        break
+                    frame_idx += 1
             ok, frame = cap.read()
             if not ok:
                 break
+            if use_video_timeline:
+                frame_time_s = float(frame_idx / fps)
+                wall_elapsed_s = time.perf_counter() - session_start_time
+                if frame_time_s > wall_elapsed_s:
+                    time.sleep(min(0.05, frame_time_s - wall_elapsed_s))
             if frame_idx % capture_stride != 0:
                 frame_idx += 1
                 continue
@@ -631,6 +692,7 @@ def run_camera_coach(
             )
 
             if raw_pts is not None and norm_pts is not None:
+                accepted_hint: Optional[dict[str, Any]] = None
                 draw_pose_skeleton(query_view, raw_pts)
                 pose_window.append(norm_pts)
                 current_points, _, current_feature, current_angles = build_current_feature(
@@ -640,13 +702,14 @@ def run_camera_coach(
                     feature_std=ref_data["feature_std"],
                 )
 
-                elapsed_s = time.perf_counter() - session_start_time
+                elapsed_s = float(frame_idx / fps) if use_video_timeline else time.perf_counter() - session_start_time
                 if ref_times.size:
                     target_time_s = min(float(elapsed_s), float(ref_times[-1]))
                     target_ref_seq_idx = int(np.searchsorted(ref_times, target_time_s, side="left"))
                     target_ref_seq_idx = int(np.clip(target_ref_seq_idx, 0, ref_length - 1))
                 else:
                     target_ref_seq_idx = min(current_ref_seq_idx + 1, ref_length - 1)
+                    target_time_s = float(target_ref_seq_idx)
 
                 search_radius = max(3, int(ref_search_window))
                 search_start = max(0, target_ref_seq_idx - search_radius)
@@ -661,9 +724,27 @@ def run_camera_coach(
                         best_ref_idx = ref_idx
 
                 current_ref_seq_idx = best_ref_idx
-                phase = get_phase_definition(int(ref_data["phase_ids"][target_ref_seq_idx]))
-                latest_phase_name = phase.display_name
-                latest_phase_cue = phase.cue
+                target_phase_id = int(ref_data["phase_ids"][current_ref_seq_idx])
+                phase = get_phase_definition(target_phase_id)
+                if ref_data.get("substage_keys") is not None and len(ref_data["substage_keys"]) > current_ref_seq_idx:
+                    substage_key = str(ref_data["substage_keys"][current_ref_seq_idx])
+                    substage = get_substage_by_key(target_phase_id, substage_key)
+                    if substage is None:
+                        substage = get_substage_definition(target_phase_id, 0.0)
+                else:
+                    phase_times = ref_times[ref_data["phase_ids"] == target_phase_id] if ref_times.size else np.asarray([], dtype=np.float32)
+                    if phase_times.size:
+                        phase_start_s = float(phase_times[0])
+                        phase_end_s = float(phase_times[-1])
+                        phase_progress = (float(target_time_s) - phase_start_s) / max(1e-6, phase_end_s - phase_start_s)
+                    else:
+                        phase_progress = 0.0
+                    substage = get_substage_definition(target_phase_id, phase_progress)
+                latest_phase_name = f"{phase.display_name} - {substage.name}"
+                latest_phase_cue = substage.cue
+                latest_substage_key = substage.key
+                latest_substage_name = substage.name
+                latest_substage_cue = substage.cue
                 instant_score = distance_to_score(best_dist, score_scale)
                 running_scores.append(instant_score)
                 latest_local_err = float(
@@ -673,7 +754,8 @@ def run_camera_coach(
                     ref_points=ref_data["points"][current_ref_seq_idx],
                     qry_points=current_points,
                     hint_threshold=hint_threshold,
-                    phase_id=int(ref_data["phase_ids"][target_ref_seq_idx]),
+                    phase_id=target_phase_id,
+                    substage_key=latest_substage_key,
                     ref_angles=ref_data["angle_features"][current_ref_seq_idx],
                     qry_angles=current_angles,
                 )
@@ -683,19 +765,25 @@ def run_camera_coach(
                     and len(live_hints) < int(max_hints)
                     and (processed_idx - last_hint_processed_idx) >= int(hint_min_interval)
                 ):
-                    live_hints.append(
-                        {
-                            "query_frame": int(frame_idx),
-                            "query_time_s": float(frame_idx / fps),
-                            "phase_name": latest_phase_name,
-                            "cue": latest_phase_cue,
-                            "part": latest_part,
-                            "message": active_hint,
-                            "score": float(instant_score),
-                        }
-                    )
+                    accepted_hint = {
+                        "query_frame": int(frame_idx),
+                        "query_time_s": float(frame_idx / fps),
+                        "phase_name": latest_phase_name,
+                        "cue": latest_phase_cue,
+                        "substage_key": latest_substage_key,
+                        "substage_name": latest_substage_name,
+                        "substage_cue": latest_substage_cue,
+                        "part": latest_part,
+                        "message": active_hint,
+                        "score": float(instant_score),
+                        "local_error": float(latest_local_err),
+                        "ref_frame": int(ref_data["frame_indices"][current_ref_seq_idx]),
+                        "ref_time_s": float(ref_data["time_s"][current_ref_seq_idx]) if ref_times.size else 0.0,
+                    }
+                    live_hints.append(accepted_hint)
                     last_hint_processed_idx = processed_idx
             else:
+                accepted_hint = None
                 draw_text_block(
                     query_view,
                     ["未检测到完整人体姿态。", "请站在画面中央，并保持全身入镜。"],
@@ -703,7 +791,7 @@ def run_camera_coach(
                     y=18,
                 )
 
-            if ref_cap is not None:
+            if ref_cap is not None and (record_compare_video or accepted_hint is not None):
                 target_ref_frame = int(ref_data["frame_indices"][current_ref_seq_idx])
                 current_ref_frame_idx, current_ref_frame = get_aligned_reference_frame(
                     ref_cap=ref_cap,
@@ -719,6 +807,45 @@ def run_camera_coach(
             else:
                 ref_view = np.zeros_like(query_view)
 
+            if accepted_hint is not None and record_error_frames and out_error_frames_dir:
+                error_key = f"{latest_phase_name}|{latest_part}|{active_hint}"
+                if error_key in saved_error_keys:
+                    accepted_hint = None
+                else:
+                    saved_error_keys.add(error_key)
+            if accepted_hint is not None and record_error_frames and out_error_frames_dir:
+                error_index = len(error_frames) + 1
+                image_name = f"error_{error_index:03d}.jpg"
+                image_path = str(Path(out_error_frames_dir) / image_name)
+                error_frame = compose_error_frame(
+                    ref_frame=ref_view,
+                    qry_frame=query_view,
+                    phase_name=latest_phase_name,
+                    part=latest_part,
+                    local_error=latest_local_err,
+                    active_hint=active_hint,
+                    query_time_s=float(frame_idx / fps),
+                )
+                if cv2.imwrite(image_path, error_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90]):
+                    accepted_hint["error_frame_path"] = image_path
+                    error_frames.append(
+                        {
+                            "image_path": image_path,
+                            "query_frame": accepted_hint["query_frame"],
+                            "query_time_s": accepted_hint["query_time_s"],
+                            "ref_frame": accepted_hint["ref_frame"],
+                            "ref_time_s": accepted_hint["ref_time_s"],
+                            "phase_name": latest_phase_name,
+                            "substage_key": latest_substage_key,
+                            "substage_name": latest_substage_name,
+                            "substage_cue": latest_substage_cue,
+                            "part": latest_part,
+                            "message": active_hint,
+                            "local_error": float(latest_local_err),
+                            "score": float(accepted_hint["score"]),
+                        }
+                    )
+
             current_score = float(np.mean(running_scores[-60:])) if running_scores else 0.0
             hint_text = active_hint if active_hint_left > 0 else ""
             if active_hint_left > 0:
@@ -728,8 +855,13 @@ def run_camera_coach(
                     {
                         "query_frame": int(frame_idx),
                         "query_time_s": float(frame_idx / fps),
+                        "ref_frame": int(ref_data["frame_indices"][current_ref_seq_idx]) if ref_length else 0,
+                        "ref_time_s": float(ref_data["time_s"][current_ref_seq_idx]) if ref_times.size else 0.0,
                         "phase_name": latest_phase_name,
                         "phase_cue": latest_phase_cue,
+                        "substage_key": latest_substage_key,
+                        "substage_name": latest_substage_name,
+                        "substage_cue": latest_substage_cue,
                         "part": latest_part,
                         "message": hint_text,
                         "score": current_score,
@@ -861,9 +993,14 @@ def run_camera_coach(
         "avg_score_0_100": float(np.mean(running_scores)) if running_scores else 0.0,
         "final_phase_name": latest_phase_name,
         "final_phase_cue": latest_phase_cue,
+        "final_substage_key": latest_substage_key,
+        "final_substage_name": latest_substage_name,
+        "final_substage_cue": latest_substage_cue,
         "final_part": latest_part,
         "hint_count": int(len(live_hints)),
         "hints": live_hints,
+        "error_frame_count": int(len(error_frames)),
+        "error_frames": error_frames,
         "template_path": template_path,
         "output_video": actual_out_video,
     }

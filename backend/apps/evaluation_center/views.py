@@ -70,6 +70,7 @@ def evaluation_task_create_view(request):
         export_video=validated.get("export_video", False),
         frame_stride=validated.get("frame_stride", 1),
         smooth_window=validated.get("smooth_window", 5),
+        pose_model=validated.get("pose_model", "follow_template"),
         progress_percent=0,
         progress_text="任务已创建，等待开始",
     )

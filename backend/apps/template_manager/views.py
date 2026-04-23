@@ -6,10 +6,9 @@ from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 
-from config.api_response import api_error, api_success
-
 from apps.accounts.models import User
 from apps.accounts.permissions import IsAdminRole
+from config.api_response import api_error, api_success
 
 from .models import ActionCategory, TemplateVideo
 from .serializers import (
@@ -66,6 +65,7 @@ def template_upload_view(request):
             source_video=validated["source_video"],
             frame_stride=validated.get("frame_stride", 4),
             smooth_window=validated.get("smooth_window", 7),
+            pose_model=validated.get("pose_model", "heavy"),
             created_by=request.user,
         )
         register_source_asset(template)
@@ -86,7 +86,7 @@ def template_detail_view(request, template_id: int):
 def template_delete_view(request, template_id: int):
     template = get_object_or_404(TemplateVideo, id=template_id)
     if template.status == TemplateVideo.Status.BUILDING:
-        return api_error(message="模板正在生成中，请生成结束后再删除", status_code=400)
+        return api_error(message="模板正在生成中，请生成结束后再删除。", status_code=400)
     template_name = template.template_name
     try:
         delete_template_bundle(template)

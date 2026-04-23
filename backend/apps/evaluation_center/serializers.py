@@ -4,6 +4,12 @@ from rest_framework import serializers
 
 from apps.template_manager.models import FileAsset, TemplateVideo
 from apps.template_manager.serializers import TemplateVideoListSerializer
+from fitness_action_eval.model_options import (
+    DEFAULT_RUNTIME_MODEL_KEY,
+    FOLLOW_TEMPLATE_MODEL_KEY,
+    get_pose_model_label,
+    normalize_pose_model_key,
+)
 
 from .models import EvaluationHint, EvaluationPhaseResult, EvaluationTask
 
@@ -19,6 +25,7 @@ class EvaluationTaskCreateSerializer(serializers.Serializer):
     export_video = serializers.BooleanField(required=False, default=False)
     frame_stride = serializers.IntegerField(required=False, min_value=1, default=6)
     smooth_window = serializers.IntegerField(required=False, min_value=1, default=3)
+    pose_model = serializers.CharField(required=False, default=DEFAULT_RUNTIME_MODEL_KEY)
 
     def validate_template_id(self, value):
         try:
@@ -29,11 +36,19 @@ class EvaluationTaskCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError("模板尚未生成完成，暂时不能用于评估。")
         return value
 
+    def validate_pose_model(self, value: str) -> str:
+        return normalize_pose_model_key(
+            value,
+            default=DEFAULT_RUNTIME_MODEL_KEY,
+            include_follow_template=True,
+        )
+
 
 class EvaluationTaskListSerializer(serializers.ModelSerializer):
     template = TemplateVideoListSerializer(read_only=True)
     username = serializers.CharField(source="user.username", read_only=True)
     query_video_url = serializers.SerializerMethodField()
+    pose_model_label = serializers.SerializerMethodField()
 
     class Meta:
         model = EvaluationTask
@@ -46,6 +61,8 @@ class EvaluationTaskListSerializer(serializers.ModelSerializer):
             "normalized_distance",
             "hint_count",
             "export_video",
+            "pose_model",
+            "pose_model_label",
             "progress_percent",
             "progress_text",
             "created_at",
@@ -58,6 +75,11 @@ class EvaluationTaskListSerializer(serializers.ModelSerializer):
 
     def get_query_video_url(self, obj: EvaluationTask) -> str:
         return obj.query_video.url if obj.query_video else ""
+
+    def get_pose_model_label(self, obj: EvaluationTask) -> str:
+        if obj.pose_model == FOLLOW_TEMPLATE_MODEL_KEY:
+            return f"跟随模板（{get_pose_model_label(obj.template.pose_model)}）"
+        return get_pose_model_label(obj.pose_model)
 
 
 class EvaluationTaskDetailSerializer(EvaluationTaskListSerializer):
@@ -79,6 +101,8 @@ class EvaluationTaskDetailSerializer(EvaluationTaskListSerializer):
             "score_scale",
             "frame_stride",
             "smooth_window",
+            "pose_model",
+            "pose_model_label",
             "file_assets",
         )
 

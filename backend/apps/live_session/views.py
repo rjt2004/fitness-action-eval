@@ -57,14 +57,16 @@ def live_session_start_view(request):
         camera_height=validated.get("camera_height"),
         camera_mirror=validated.get("camera_mirror", True),
         preview=validated.get("preview", False),
-        export_video=validated.get("export_video", False),
-        frame_stride=validated.get("frame_stride", 8),
-        smooth_window=validated.get("smooth_window", 3),
+        export_video=False,
+        capture_error_frames=validated.get("capture_error_frames", False),
+        frame_stride=validated.get("frame_stride", 1),
+        smooth_window=validated.get("smooth_window", 1),
+        pose_model=validated.get("pose_model", "lite"),
         score_scale=validated.get("score_scale", "8.00"),
         hint_threshold=validated.get("hint_threshold", "0.200"),
-        hint_min_interval=validated.get("hint_min_interval", 6),
-        max_hints=validated.get("max_hints", 60),
-        ref_search_window=validated.get("ref_search_window", 10),
+        hint_min_interval=validated.get("hint_min_interval", 60),
+        max_hints=validated.get("max_hints", 360),
+        ref_search_window=validated.get("ref_search_window", 60),
     )
     start_live_session(session)
     session.refresh_from_db()

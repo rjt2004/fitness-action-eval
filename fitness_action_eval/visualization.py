@@ -3,6 +3,7 @@ from functools import lru_cache
 from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
+import imageio.v2 as imageio
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -249,6 +250,39 @@ def compose_live_query_frame(
     phase_cue: str = "",
 ) -> np.ndarray:
     return qry_frame.copy()
+
+
+def compose_error_frame(
+    ref_frame: np.ndarray,
+    qry_frame: np.ndarray,
+    phase_name: str,
+    part: str,
+    local_error: float,
+    active_hint: str,
+    query_time_s: float,
+) -> np.ndarray:
+    target_height = min(max(ref_frame.shape[0], qry_frame.shape[0]), 520)
+    ref_view = resize_to_height(ref_frame, target_height)
+    qry_view = resize_to_height(qry_frame, target_height)
+    target_width = max(ref_view.shape[1], qry_view.shape[1])
+    ref_view = pad_to_width(ref_view, target_width)
+    qry_view = pad_to_width(qry_view, target_width)
+    canvas = np.concatenate([ref_view, qry_view], axis=1)
+    divider_x = ref_view.shape[1]
+    cv2.line(canvas, (divider_x, 0), (divider_x, canvas.shape[0] - 1), (0, 140, 255), 2, cv2.LINE_AA)
+    draw_utf8_text(canvas, "标准动作", (20, 10), 28, (255, 220, 120), shadow_color=(0, 0, 0))
+    draw_utf8_text(canvas, "实时动作", (divider_x + 20, 10), 28, (120, 255, 180), shadow_color=(0, 0, 0))
+
+    lines = [
+        f"动作阶段：{phase_name or '--'}",
+        f"关注部位：{part or '--'}",
+        f"局部偏差：{local_error:.3f}" if np.isfinite(local_error) else "局部偏差：--",
+        f"触发时间：{query_time_s:.1f}s",
+    ]
+    if active_hint:
+        lines.append(f"纠错提示：{active_hint}")
+    draw_text_block(canvas, lines, x=20, y=52)
+    return canvas
 
 
 def save_plot(
@@ -499,6 +533,7 @@ def render_feedback_video(
         fps = 25.0
 
     writer = None
+    writer_kind: Optional[str] = None
     if output_video:
         ensure_parent_dir(output_video)
 
@@ -584,20 +619,35 @@ def render_feedback_video(
             output_frame = query_view
 
         if writer is None and output_video:
-            writer = cv2.VideoWriter(
-                output_video,
-                cv2.VideoWriter_fourcc(*"mp4v"),
-                fps,
-                (output_frame.shape[1], output_frame.shape[0]),
-            )
-            if not writer.isOpened():
-                cap.release()
-                if ref_cap is not None:
-                    ref_cap.release()
-                raise RuntimeError(f"Cannot open video writer: {output_video}")
+            try:
+                writer = imageio.get_writer(
+                    output_video,
+                    fps=fps,
+                    codec="libx264",
+                    pixelformat="yuv420p",
+                    macro_block_size=1,
+                    ffmpeg_log_level="error",
+                )
+                writer_kind = "imageio"
+            except Exception:
+                writer = cv2.VideoWriter(
+                    output_video,
+                    cv2.VideoWriter_fourcc(*"mp4v"),
+                    fps,
+                    (output_frame.shape[1], output_frame.shape[0]),
+                )
+                writer_kind = "cv2"
+                if not writer.isOpened():
+                    cap.release()
+                    if ref_cap is not None:
+                        ref_cap.release()
+                    raise RuntimeError(f"Cannot open video writer: {output_video}")
 
         if writer is not None:
-            writer.write(output_frame)
+            if writer_kind == "imageio":
+                writer.append_data(cv2.cvtColor(output_frame, cv2.COLOR_BGR2RGB))
+            else:
+                writer.write(output_frame)
         if preview:
             window_name = "DTW Compare Preview" if use_compare_mode else "Feedback Preview"
             should_continue = preview_frame(window_name, output_frame)
@@ -612,7 +662,10 @@ def render_feedback_video(
             progress_callback(progress, "正在生成对比视频")
 
     if writer is not None:
-        writer.release()
+        if writer_kind == "imageio":
+            writer.close()
+        else:
+            writer.release()
     cap.release()
     if ref_cap is not None:
         ref_cap.release()

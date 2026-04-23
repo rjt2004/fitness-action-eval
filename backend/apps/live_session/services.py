@@ -13,6 +13,7 @@ from django.conf import settings
 from django.db import close_old_connections
 
 from config.video_utils import transcode_to_browser_mp4
+from fitness_action_eval.model_options import FOLLOW_TEMPLATE_MODEL_KEY, resolve_pose_model_path
 from fitness_action_eval.pipeline import run_camera_coach
 
 from .models import LiveSession
@@ -40,6 +41,7 @@ def _update_session_summary(session: LiveSession, summary: dict, status: str) ->
     session.final_phase_name = str(summary.get("final_phase_name", ""))
     session.final_phase_cue = str(summary.get("final_phase_cue", ""))
     session.final_part = str(summary.get("final_part", ""))
+    session.error_frame_count = int(len(summary.get("error_frames", [])))
     session.status = status
     session.ended_at = datetime.now()
     session.save(
@@ -51,6 +53,7 @@ def _update_session_summary(session: LiveSession, summary: dict, status: str) ->
             "final_phase_name",
             "final_phase_cue",
             "final_part",
+            "error_frame_count",
             "status",
             "ended_at",
             "updated_at",
@@ -100,6 +103,7 @@ def _run_live_session_worker(session_id: int, stop_event: threading.Event, pause
     try:
         session = LiveSession.objects.select_related("template", "user").get(id=session_id)
         summary_path, video_path = _session_result_paths(session)
+        error_frames_dir = str(Path(summary_path).with_name("error_frames")) if session.capture_error_frames else None
         session.status = LiveSession.Status.RUNNING
         session.started_at = datetime.now()
         session.error_message = ""
@@ -129,11 +133,13 @@ def _run_live_session_worker(session_id: int, stop_event: threading.Event, pause
             max_hints=int(session.max_hints),
             ref_search_window=session.ref_search_window,
             frame_stride=session.frame_stride,
+            camera_task_model=None if session.pose_model == FOLLOW_TEMPLATE_MODEL_KEY else resolve_pose_model_path(session.pose_model),
             camera_width=session.camera_width,
             camera_height=session.camera_height,
             camera_mirror=session.camera_mirror,
             out_json=summary_path,
             out_video=video_path if session.export_video else None,
+            out_error_frames_dir=error_frames_dir,
             preview=session.preview,
             max_frames=session.max_frames,
             stop_checker=stop_event.is_set,

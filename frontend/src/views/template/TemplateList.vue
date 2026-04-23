@@ -1,21 +1,20 @@
 <script setup>
 import { onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import {
-  deleteTemplate,
-  getTemplateList,
-  uploadTemplate,
-} from "@/api/template";
+import { deleteTemplate, getTemplateList, uploadTemplate } from "@/api/template";
+import { getPoseModelOptions } from "@/api/system";
 
 const loading = ref(false);
 const tableData = ref([]);
 const uploadFile = ref(null);
+const poseModelOptions = ref([]);
 let pollTimer = null;
 
 const form = reactive({
   template_name: "八段锦标准模板",
   frame_stride: 4,
   smooth_window: 5,
+  pose_model: "heavy",
 });
 
 function statusType(status) {
@@ -57,6 +56,10 @@ async function loadData() {
   schedulePolling();
 }
 
+async function loadPoseModelOptions() {
+  poseModelOptions.value = await getPoseModelOptions();
+}
+
 function handleFileChange(file) {
   uploadFile.value = file.raw;
 }
@@ -71,6 +74,7 @@ async function handleUploadAndBuild() {
   payload.append("template_name", form.template_name);
   payload.append("frame_stride", form.frame_stride);
   payload.append("smooth_window", form.smooth_window);
+  payload.append("pose_model", form.pose_model);
   payload.append("source_video", uploadFile.value);
 
   loading.value = true;
@@ -105,7 +109,10 @@ async function handleDelete(row) {
   }
 }
 
-onMounted(loadData);
+onMounted(() => {
+  loadPoseModelOptions();
+  loadData();
+});
 onBeforeUnmount(clearPolling);
 </script>
 
@@ -125,15 +132,20 @@ onBeforeUnmount(clearPolling);
         <el-form-item label="平滑窗口">
           <el-input-number v-model="form.smooth_window" :min="1" :max="15" />
         </el-form-item>
+        <el-form-item label="姿态模型">
+          <el-select v-model="form.pose_model" style="width: 190px">
+            <el-option
+              v-for="item in poseModelOptions"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </el-form-item>
       </el-form>
 
       <div class="template-upload">
-        <el-upload
-          :auto-upload="false"
-          :limit="1"
-          accept="video/*"
-          :on-change="handleFileChange"
-        >
+        <el-upload :auto-upload="false" :limit="1" accept="video/*" :on-change="handleFileChange">
           <el-button type="primary" plain>选择标准视频</el-button>
         </el-upload>
         <el-button type="primary" :loading="loading" @click="handleUploadAndBuild">
@@ -146,7 +158,7 @@ onBeforeUnmount(clearPolling);
       <h3 class="section-title">模板列表</h3>
       <el-table :data="tableData" stripe style="width: 100%">
         <el-table-column prop="id" label="ID" width="80" />
-        <el-table-column prop="template_name" label="模板名称" min-width="240" />
+        <el-table-column prop="template_name" label="模板名称" min-width="220" />
         <el-table-column label="状态" width="120">
           <template #default="{ row }">
             <el-tag :type="statusType(row.status)">{{ statusLabel(row.status) }}</el-tag>
@@ -161,23 +173,22 @@ onBeforeUnmount(clearPolling);
             <span v-else>{{ progressText(row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="frame_stride" label="抽帧" width="100" />
-        <el-table-column prop="smooth_window" label="平滑" width="100" />
+        <el-table-column prop="pose_model_label" label="姿态模型" width="170" />
+        <el-table-column prop="frame_stride" label="抽帧" width="90" />
+        <el-table-column prop="smooth_window" label="平滑" width="90" />
         <el-table-column prop="created_by_name" label="创建人" width="120" />
         <el-table-column prop="created_at" label="创建时间" min-width="180" />
         <el-table-column label="操作" width="120">
           <template #default="{ row }">
-            <div class="row-actions">
-              <el-button
-                size="small"
-                type="danger"
-                plain
-                :disabled="loading || row.status === 'building'"
-                @click="handleDelete(row)"
-              >
-                删除
-              </el-button>
-            </div>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              :disabled="loading || row.status === 'building'"
+              @click="handleDelete(row)"
+            >
+              删除
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -194,11 +205,6 @@ onBeforeUnmount(clearPolling);
   display: flex;
   align-items: center;
   gap: 12px;
-}
-
-.row-actions {
-  display: flex;
-  gap: 8px;
 }
 
 .progress-cell {
