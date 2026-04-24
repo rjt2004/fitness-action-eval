@@ -9,6 +9,7 @@ import "./styles.css";
 import App from "./App.vue";
 import router from "./router";
 
+// 前端应用入口：注册 Pinia、路由和 Element Plus 组件库。
 const app = createApp(App);
 const pinia = createPinia();
 

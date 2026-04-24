@@ -9,6 +9,8 @@ from fitness_action_eval.model_options import POSE_MODEL_OPTIONS
 
 
 def health_check(request):
+    """提供服务健康状态，便于本地部署时快速确认后端是否正常。"""
+
     data = {
         "service": "fitness-action-eval-backend",
         "status": "UP",
@@ -22,6 +24,8 @@ def health_check(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def pose_model_options(request):
+    """返回前后端统一使用的姿态模型选项。"""
+
     options = [
         {
             "value": key,

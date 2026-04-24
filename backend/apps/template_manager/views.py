@@ -26,6 +26,8 @@ from .services import (
 
 
 def _visible_templates(user: User):
+    """管理员可见全部模板，普通用户仅可见已生成完成的模板。"""
+
     queryset = TemplateVideo.objects.select_related("category", "created_by").order_by("-id")
     if user.role == User.Role.ADMIN:
         return queryset
@@ -35,6 +37,8 @@ def _visible_templates(user: User):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def category_list_view(request):
+    """动作分类列表。"""
+
     ensure_default_baduanjin_category()
     categories = ActionCategory.objects.filter(is_active=True).order_by("id")
     return api_success(data=ActionCategorySerializer(categories, many=True).data, message="获取动作类别成功")
@@ -43,6 +47,8 @@ def category_list_view(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def template_list_view(request):
+    """模板列表。"""
+
     templates = _visible_templates(request.user)
     return api_success(data=TemplateVideoListSerializer(templates, many=True).data, message="获取模板列表成功")
 
@@ -50,6 +56,8 @@ def template_list_view(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, IsAdminRole])
 def template_upload_view(request):
+    """管理员上传标准视频并触发模板生成。"""
+
     serializer = TemplateUploadSerializer(data=request.data)
     if not serializer.is_valid():
         return api_error(message="模板上传失败", data=serializer.errors, status_code=400)
@@ -77,6 +85,8 @@ def template_upload_view(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def template_detail_view(request, template_id: int):
+    """模板详情。"""
+
     template = get_object_or_404(_visible_templates(request.user), id=template_id)
     return api_success(data=TemplateVideoDetailSerializer(template).data, message="获取模板详情成功")
 
@@ -84,15 +94,17 @@ def template_detail_view(request, template_id: int):
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated, IsAdminRole])
 def template_delete_view(request, template_id: int):
+    """删除模板及其源视频、模板文件。"""
+
     template = get_object_or_404(TemplateVideo, id=template_id)
     if template.status == TemplateVideo.Status.BUILDING:
-        return api_error(message="模板正在生成中，请生成结束后再删除。", status_code=400)
+        return api_error(message="模板正在生成中，请等待生成结束后再删除。", status_code=400)
     template_name = template.template_name
     try:
         delete_template_bundle(template)
     except ProtectedError:
         return api_error(
-            message="模板已被评估任务或实时会话使用，暂时不能删除。",
+            message="模板已被离线评估任务或实时会话使用，暂时不能删除。",
             status_code=400,
         )
     return api_success(data={"template_id": template_id, "template_name": template_name}, message="模板删除成功")

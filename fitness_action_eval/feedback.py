@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""评分后的局部偏差分析与提示生成。"""
+
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -19,7 +21,15 @@ def part_errors(
     qry_angles: Optional[np.ndarray] = None,
     phase_id: Optional[int] = None,
 ) -> Dict[str, Dict[str, float]]:
-    # 统计各身体部位与模板之间的平均偏差及方向，并融合关节角度误差。
+    """统计各身体部位相对模板的偏差。
+
+    当前误差由两部分组成：
+    1. 关键点几何位置误差
+    2. 关节角度误差
+
+    最终按 0.8 / 0.2 融合，并叠加八段锦各阶段的部位权重。
+    """
+
     out: Dict[str, Dict[str, float]] = {}
     angle_index = {
         "left_shoulder": 0,
@@ -69,7 +79,8 @@ def build_live_feedback(
     ref_angles: Optional[np.ndarray] = None,
     qry_angles: Optional[np.ndarray] = None,
 ) -> Tuple[str, float, Optional[str]]:
-    # 针对单帧实时比对生成当前提示。
+    """为实时模式生成单帧提示。"""
+
     p_err = part_errors(
         ref_pts=ref_points,
         qry_pts=qry_points,
@@ -92,7 +103,13 @@ def build_live_feedback(
     if best_info["score"] < effective_threshold:
         return "", point_err, best_part
 
-    message = build_baduanjin_hint_text(phase_id=phase_id, part=best_part, dx=best_info["dx"], dy=best_info["dy"], substage_key=substage_key)
+    message = build_baduanjin_hint_text(
+        phase_id=phase_id,
+        part=best_part,
+        dx=best_info["dx"],
+        dy=best_info["dy"],
+        substage_key=substage_key,
+    )
     return message, point_err, best_part
 
 
@@ -111,7 +128,8 @@ def build_feedback(
     ref_angles: Optional[np.ndarray] = None,
     qry_angles: Optional[np.ndarray] = None,
 ) -> Tuple[List[Dict[str, Any]], np.ndarray]:
-    # 沿着 DTW 对齐路径计算局部误差，并在关键阶段生成八段锦中文提示。
+    """沿着 DTW 对齐路径生成离线提示和每帧局部误差。"""
+
     q_len = qry_points.shape[0]
     local_sum = np.zeros((q_len,), dtype=np.float32)
     local_cnt = np.zeros((q_len,), dtype=np.int32)
@@ -159,7 +177,11 @@ def build_feedback(
                 "query_index": int(j),
                 "query_phase_id": int(qry_phase_ids[j]) if qry_phase_ids is not None else None,
                 "phase_id": int(phase_id) if phase_id is not None else None,
-                "phase_name": f"{phase.display_name} - {substage_name}" if phase is not None and substage_name else (phase.display_name if phase is not None else "通用动作"),
+                "phase_name": (
+                    f"{phase.display_name} - {substage_name}"
+                    if phase is not None and substage_name
+                    else (phase.display_name if phase is not None else "通用动作")
+                ),
                 "cue": substage_cue or (phase.cue if phase is not None else ""),
                 "substage_key": substage_key,
                 "substage_name": substage_name,

@@ -18,14 +18,14 @@ from .models import LiveSession
 
 
 class LiveSessionStartSerializer(serializers.Serializer):
+    """实时跟练创建参数。"""
+
     template_id = serializers.IntegerField()
     session_name = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
     camera_source = serializers.CharField(required=False, default="0")
     camera_width = serializers.IntegerField(required=False, allow_null=True, min_value=1, default=480)
     camera_height = serializers.IntegerField(required=False, allow_null=True, min_value=1, default=270)
     camera_mirror = serializers.BooleanField(required=False, default=True)
-    preview = serializers.BooleanField(required=False, default=False)
-    export_video = serializers.BooleanField(required=False, default=False)
     capture_error_frames = serializers.BooleanField(required=False, default=False)
     frame_stride = serializers.IntegerField(required=False, min_value=1, default=1)
     smooth_window = serializers.IntegerField(required=False, min_value=1, default=1)
@@ -36,7 +36,7 @@ class LiveSessionStartSerializer(serializers.Serializer):
     max_hints = serializers.IntegerField(required=False, min_value=1, default=360)
     ref_search_window = serializers.IntegerField(required=False, min_value=10, default=60)
 
-    def validate_template_id(self, value):
+    def validate_template_id(self, value: int) -> int:
         try:
             template = TemplateVideo.objects.get(id=value)
         except TemplateVideo.DoesNotExist as exc:
@@ -54,6 +54,8 @@ class LiveSessionStartSerializer(serializers.Serializer):
 
 
 class LiveSessionListSerializer(serializers.ModelSerializer):
+    """会话列表序列化器。"""
+
     template = TemplateVideoListSerializer(read_only=True)
     username = serializers.CharField(source="user.username", read_only=True)
     hint_count = serializers.SerializerMethodField()
@@ -102,6 +104,8 @@ class LiveSessionListSerializer(serializers.ModelSerializer):
 
 
 class LiveSessionDetailSerializer(LiveSessionListSerializer):
+    """会话详情序列化器。"""
+
     summary_json_path = serializers.CharField()
     output_video_path = serializers.CharField()
     final_phase_cue = serializers.CharField()
@@ -115,8 +119,6 @@ class LiveSessionDetailSerializer(LiveSessionListSerializer):
             "camera_width",
             "camera_height",
             "camera_mirror",
-            "preview",
-            "export_video",
             "capture_error_frames",
             "error_frame_count",
             "frame_stride",
@@ -137,10 +139,10 @@ class LiveSessionDetailSerializer(LiveSessionListSerializer):
             "runtime_payload",
         )
 
-    def get_summary_payload(self, obj: LiveSession):
+    def get_summary_payload(self, obj: LiveSession) -> dict:
         return self._load_summary_payload(obj)
 
-    def get_runtime_payload(self, obj: LiveSession):
+    def get_runtime_payload(self, obj: LiveSession) -> dict:
         from .services import get_live_session_runtime_payload
 
         return get_live_session_runtime_payload(obj.id)

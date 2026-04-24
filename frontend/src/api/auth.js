@@ -1,5 +1,6 @@
 import request from "@/utils/request";
 
+// 认证相关接口。
 export function login(data) {
   return request.post("/api/auth/login/", data);
 }

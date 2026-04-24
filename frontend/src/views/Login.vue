@@ -10,6 +10,7 @@ const route = useRoute();
 const authStore = useAuthStore();
 const loading = ref(false);
 
+// 登录表单只保留最基础的账号密码字段。
 const form = reactive({
   username: "",
   password: "",
@@ -103,13 +104,6 @@ async function handleLogin() {
   margin: 20px 0 12px;
   font-size: 54px;
   line-height: 1.1;
-}
-
-.login-page__hero p {
-  max-width: 620px;
-  color: #475569;
-  font-size: 18px;
-  line-height: 1.8;
 }
 
 .login-panel {

@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""八段锦专项规则与动作阶段定义。
+
+本文件集中维护：
+1. 关键关节角定义
+2. 大阶段与子阶段配置
+3. 各阶段的部位权重和提示模板
+4. 子阶段状态机规则
+"""
+
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Dict, List, Mapping, Sequence

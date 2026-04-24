@@ -7,6 +7,7 @@ const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
 
+// 根据角色切换左侧导航，只保留当前毕业设计所需的功能入口。
 const items = computed(() => {
   if (authStore.user?.role === "admin") {
     return [

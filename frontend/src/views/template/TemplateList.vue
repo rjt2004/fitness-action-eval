@@ -10,6 +10,7 @@ const uploadFile = ref(null);
 const poseModelOptions = ref([]);
 let pollTimer = null;
 
+// 模板生成参数默认更偏向提取精度，而不是实时性。
 const form = reactive({
   template_name: "八段锦标准模板",
   frame_stride: 4,

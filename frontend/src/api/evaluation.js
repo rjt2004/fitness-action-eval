@@ -1,5 +1,6 @@
 import request from "@/utils/request";
 
+// 离线评估接口。
 export function getEvaluationTasks() {
   return request.get("/api/evaluation-center/tasks/");
 }

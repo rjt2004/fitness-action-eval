@@ -5,6 +5,8 @@ from django.db import models
 
 
 class AccountUserManager(UserManager):
+    """自定义用户管理器，确保超级管理员默认拥有 admin 角色。"""
+
     def create_superuser(self, username, email=None, password=None, **extra_fields):
         extra_fields.setdefault("is_staff", True)
         extra_fields.setdefault("is_superuser", True)
@@ -14,6 +16,8 @@ class AccountUserManager(UserManager):
 
 
 class User(AbstractUser):
+    """系统用户模型，仅保留毕业设计所需的管理员与普通用户两类角色。"""
+
     class Role(models.TextChoices):
         ADMIN = "admin", "管理员"
         USER = "user", "普通用户"

@@ -8,7 +8,7 @@ import AppSidebar from "@/components/AppSidebar.vue";
 const route = useRoute();
 const authStore = useAuthStore();
 
-const pageTitle = computed(() => route.meta?.title || "健身动作评价系统");
+const pageTitle = computed(() => route.meta?.title || "健身动作评价");
 </script>
 
 <template>

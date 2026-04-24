@@ -82,6 +82,7 @@ const router = createRouter({
   ],
 });
 
+// 统一做登录校验和角色跳转。
 router.beforeEach((to) => {
   const authStore = useAuthStore();
   authStore.hydrate();

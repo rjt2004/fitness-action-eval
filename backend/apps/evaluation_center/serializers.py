@@ -15,6 +15,8 @@ from .models import EvaluationHint, EvaluationPhaseResult, EvaluationTask
 
 
 class EvaluationTaskCreateSerializer(serializers.Serializer):
+    """提交离线评估任务时的参数校验。"""
+
     template_id = serializers.IntegerField()
     task_name = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
     query_video = serializers.FileField()
@@ -45,6 +47,8 @@ class EvaluationTaskCreateSerializer(serializers.Serializer):
 
 
 class EvaluationTaskListSerializer(serializers.ModelSerializer):
+    """离线评估列表页展示所需字段。"""
+
     template = TemplateVideoListSerializer(read_only=True)
     username = serializers.CharField(source="user.username", read_only=True)
     query_video_url = serializers.SerializerMethodField()
@@ -83,6 +87,8 @@ class EvaluationTaskListSerializer(serializers.ModelSerializer):
 
 
 class EvaluationTaskDetailSerializer(EvaluationTaskListSerializer):
+    """详情页额外展示结果文件和参数信息。"""
+
     result_json_path = serializers.CharField()
     result_plot_path = serializers.CharField()
     result_video_path = serializers.CharField()
@@ -123,6 +129,8 @@ class EvaluationTaskDetailSerializer(EvaluationTaskListSerializer):
 
 
 class EvaluationPhaseResultSerializer(serializers.ModelSerializer):
+    """分阶段结果序列化。"""
+
     class Meta:
         model = EvaluationPhaseResult
         fields = (
@@ -139,6 +147,8 @@ class EvaluationPhaseResultSerializer(serializers.ModelSerializer):
 
 
 class EvaluationHintSerializer(serializers.ModelSerializer):
+    """纠错提示序列化。"""
+
     class Meta:
         model = EvaluationHint
         fields = (

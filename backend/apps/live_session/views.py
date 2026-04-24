@@ -15,9 +15,7 @@ from .services import (
     delete_live_session,
     generate_session_no,
     get_live_session_preview_frame,
-    pause_live_session,
     repair_stale_live_session,
-    resume_live_session,
     session_registry_status,
     start_live_session,
     stop_live_session,
@@ -25,6 +23,8 @@ from .services import (
 
 
 def _visible_sessions(user: User):
+    """管理员看全部，普通用户只看自己的实时会话。"""
+
     queryset = LiveSession.objects.select_related("user", "template", "template__category", "template__created_by")
     if user.role == User.Role.ADMIN:
         return queryset.all()
@@ -34,6 +34,8 @@ def _visible_sessions(user: User):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def live_session_list_view(request):
+    """实时会话列表。"""
+
     sessions = [repair_stale_live_session(session) for session in _visible_sessions(request.user)]
     return api_success(data=LiveSessionListSerializer(sessions, many=True).data, message="获取实时会话列表成功")
 
@@ -41,6 +43,8 @@ def live_session_list_view(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def live_session_start_view(request):
+    """创建并启动实时跟练会话。"""
+
     serializer = LiveSessionStartSerializer(data=request.data)
     if not serializer.is_valid():
         return api_error(message="启动实时会话失败", data=serializer.errors, status_code=400)
@@ -56,8 +60,6 @@ def live_session_start_view(request):
         camera_width=validated.get("camera_width"),
         camera_height=validated.get("camera_height"),
         camera_mirror=validated.get("camera_mirror", True),
-        preview=validated.get("preview", False),
-        export_video=False,
         capture_error_frames=validated.get("capture_error_frames", False),
         frame_stride=validated.get("frame_stride", 1),
         smooth_window=validated.get("smooth_window", 1),
@@ -78,6 +80,8 @@ def live_session_start_view(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def live_session_detail_view(request, session_id: int):
+    """实时会话详情。"""
+
     session = get_object_or_404(_visible_sessions(request.user), id=session_id)
     session = repair_stale_live_session(session)
     payload = LiveSessionDetailSerializer(session).data
@@ -87,36 +91,12 @@ def live_session_detail_view(request, session_id: int):
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
-def live_session_pause_view(request, session_id: int):
-    session = get_object_or_404(_visible_sessions(request.user), id=session_id)
-    if session.status != LiveSession.Status.RUNNING:
-        return api_error(message="当前会话不在运行状态，无法暂停。", status_code=400)
-    paused = pause_live_session(session)
-    payload = LiveSessionDetailSerializer(get_object_or_404(_visible_sessions(request.user), id=session_id)).data
-    payload["runtime"] = session_registry_status(session_id)
-    payload["pause_signal_sent"] = paused
-    return api_success(data=payload, message="实时会话已暂停")
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def live_session_resume_view(request, session_id: int):
-    session = get_object_or_404(_visible_sessions(request.user), id=session_id)
-    if session.status != LiveSession.Status.PAUSED:
-        return api_error(message="当前会话不在暂停状态，无法继续。", status_code=400)
-    resumed = resume_live_session(session)
-    payload = LiveSessionDetailSerializer(get_object_or_404(_visible_sessions(request.user), id=session_id)).data
-    payload["runtime"] = session_registry_status(session_id)
-    payload["resume_signal_sent"] = resumed
-    return api_success(data=payload, message="实时会话已继续")
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
 def live_session_stop_view(request, session_id: int):
+    """向后台线程发送停止信号。"""
+
     session = get_object_or_404(_visible_sessions(request.user), id=session_id)
     if session.status not in {LiveSession.Status.PENDING, LiveSession.Status.RUNNING, LiveSession.Status.PAUSED}:
-        return api_error(message="当前会话不在可停止状态，无法停止。", status_code=400)
+        return api_error(message="当前会话不可停止。", status_code=400)
     signaled = stop_live_session(session)
     payload = LiveSessionDetailSerializer(session).data
     payload["runtime"] = session_registry_status(session.id)
@@ -127,6 +107,8 @@ def live_session_stop_view(request, session_id: int):
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def live_session_delete_view(request, session_id: int):
+    """删除已结束的实时会话及其文件。"""
+
     session = get_object_or_404(_visible_sessions(request.user), id=session_id)
     session = repair_stale_live_session(session)
     try:
@@ -139,6 +121,8 @@ def live_session_delete_view(request, session_id: int):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def live_session_preview_frame_view(request, session_id: int):
+    """保留 HTTP 预览帧接口，作为 WebSocket 的兼容回退。"""
+
     get_object_or_404(_visible_sessions(request.user), id=session_id)
     frame_bytes = get_live_session_preview_frame(session_id)
     if not frame_bytes:

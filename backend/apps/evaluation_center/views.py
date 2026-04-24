@@ -29,6 +29,8 @@ from .services import (
 
 
 def _visible_tasks(user: User):
+    """管理员可查看全部任务，普通用户仅查看自己的任务。"""
+
     queryset = EvaluationTask.objects.select_related("user", "template", "template__category", "template__created_by")
     if user.role == User.Role.ADMIN:
         return queryset.all()
@@ -38,6 +40,8 @@ def _visible_tasks(user: User):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def evaluation_task_list_view(request):
+    """离线评估任务列表。"""
+
     tasks = [repair_stale_task(task) for task in _visible_tasks(request.user)]
     payload = []
     for task in tasks:
@@ -50,6 +54,8 @@ def evaluation_task_list_view(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def evaluation_task_create_view(request):
+    """创建新的离线评估任务并放入后台线程。"""
+
     serializer = EvaluationTaskCreateSerializer(data=request.data)
     if not serializer.is_valid():
         return api_error(message="创建评估任务失败", data=serializer.errors, status_code=400)
@@ -61,7 +67,7 @@ def evaluation_task_create_view(request):
         task_no=generate_task_no(),
         user=request.user,
         template=template,
-        task_name=validated.get("task_name") or f"{template.template_name}-评分任务",
+        task_name=validated.get("task_name") or f"{template.template_name}-评估任务",
         query_video=validated["query_video"],
         score_scale=validated.get("score_scale", "8.00"),
         hint_threshold=validated.get("hint_threshold", "0.180"),
@@ -72,7 +78,7 @@ def evaluation_task_create_view(request):
         smooth_window=validated.get("smooth_window", 5),
         pose_model=validated.get("pose_model", "follow_template"),
         progress_percent=0,
-        progress_text="任务已创建，等待开始",
+        progress_text="任务已创建，等待开始处理",
     )
 
     FileAsset.objects.update_or_create(
@@ -97,6 +103,8 @@ def evaluation_task_create_view(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def evaluation_task_detail_view(request, task_id: int):
+    """离线评估任务详情。"""
+
     task = get_object_or_404(_visible_tasks(request.user), id=task_id)
     task = repair_stale_task(task)
     payload = EvaluationTaskDetailSerializer(task).data
@@ -108,6 +116,8 @@ def evaluation_task_detail_view(request, task_id: int):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def evaluation_task_phases_view(request, task_id: int):
+    """离线评估阶段结果。"""
+
     task = get_object_or_404(_visible_tasks(request.user), id=task_id)
     task = repair_stale_task(task)
     rows = EvaluationPhaseResult.objects.filter(task=task)
@@ -117,6 +127,8 @@ def evaluation_task_phases_view(request, task_id: int):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def evaluation_task_hints_view(request, task_id: int):
+    """离线评估纠错提示。"""
+
     task = get_object_or_404(_visible_tasks(request.user), id=task_id)
     task = repair_stale_task(task)
     rows = EvaluationHint.objects.filter(task=task)
@@ -126,6 +138,8 @@ def evaluation_task_hints_view(request, task_id: int):
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def evaluation_task_delete_view(request, task_id: int):
+    """删除离线评估任务及其结果文件。"""
+
     task = get_object_or_404(_visible_tasks(request.user), id=task_id)
     try:
         delete_evaluation_task(task)

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+"""算法主流程。
+
+本文件把模板生成、离线评估、实时跟练三条链路串起来，是整个算法端的入口。
+"""
+
 import json
 import os
 import time
@@ -23,6 +28,7 @@ from fitness_action_eval.baduanjin import (
 from fitness_action_eval.dtw import distance_to_score, dtw_distance_multidim
 from fitness_action_eval.feedback import build_feedback, build_live_feedback
 from fitness_action_eval.pose import (
+    LiveStreamPoseDetector,
     build_current_feature,
     build_pose_feature_bundle,
     create_pose_landmarker,
@@ -45,12 +51,16 @@ from fitness_action_eval.visualization import (
 
 
 def ensure_parent_dir(path: str) -> None:
+    """确保输出文件的父目录存在。"""
+
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
         os.makedirs(parent, exist_ok=True)
 
 
 def _ensure_baduanjin_features(data: Dict[str, Any]) -> Dict[str, Any]:
+    """补齐八段锦专项需要的阶段与子阶段特征。"""
+
     if "angle_features" not in data or "combined_features_raw" not in data or "feature_mean" not in data or "feature_std" not in data:
         feature_bundle = build_pose_feature_bundle(data["points"])
         data["angle_features"] = feature_bundle["angle_features"]
@@ -131,6 +141,8 @@ def save_pose_template(
     preview: bool = False,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, Any]:
+    """从标准视频生成可复用模板。"""
+
     # 预处理标准动作视频并导出模板文件，供后续重复评分直接加载。
     if progress_callback:
         progress_callback(5, "开始生成模板")
@@ -173,6 +185,8 @@ def save_pose_template(
 
 
 def load_pose_template(template_path: str) -> Dict[str, Any]:
+    """读取已经导出的标准动作模板。"""
+
     # 读取已导出的标准动作模板。
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"Template not found: {template_path}")
@@ -232,6 +246,8 @@ def finalize_scoring_outputs(
     preview: bool,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, Any]:
+    """汇总离线评估结果，并按需生成 JSON、DTW 图和对比视频。"""
+
     norm_dist = dist / max(1, len(path))
     score = distance_to_score(norm_dist, score_scale)
 
@@ -446,6 +462,8 @@ def run_dtw_scoring_from_template(
     query_task_model: Optional[str] = None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, Any]:
+    """直接加载模板并处理测试视频，适合重复评估。"""
+
     # 直接加载模板并只处理待测视频，适合重复评分场景。
     ref_data = load_pose_template(template_path)
     if progress_callback:
@@ -572,6 +590,14 @@ def run_camera_coach(
     frame_callback: Optional[Callable[[np.ndarray], None]] = None,
     state_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
+    """运行实时跟练主循环。
+
+    关键点：
+    1. 参考动作来自模板或标准视频。
+    2. 输入源可以是摄像头，也可以是本地视频模拟摄像头。
+    3. 实时模式优先使用异步姿态检测，只消费最新结果，降低卡顿感。
+    """
+
     capture_stride = max(1, int(frame_stride))
     ref_data = _load_or_prepare_reference(
         template_path=template_path,
@@ -638,8 +664,14 @@ def run_camera_coach(
     ref_length = int(ref_data["features"].shape[0])
     session_start_time = time.perf_counter()
     use_video_timeline = _is_video_file_source(camera_source)
+    use_async_live_stream = True
 
-    with create_pose_landmarker(task_model=live_task_model, num_poses=ref_data["num_poses"]) as landmarker:
+    detector_context = (
+        LiveStreamPoseDetector(task_model=live_task_model, num_poses=ref_data["num_poses"])
+        if use_async_live_stream
+        else create_pose_landmarker(task_model=live_task_model, num_poses=ref_data["num_poses"])
+    )
+    with detector_context as landmarker:
         while True:
             if stop_checker is not None and stop_checker():
                 break
@@ -652,9 +684,8 @@ def run_camera_coach(
             if max_frames is not None and frame_idx >= max_frames:
                 break
             if use_video_timeline:
-                # A file used as a virtual camera should behave like a real-time source:
-                # never play faster than wall clock, and skip stale frames instead of
-                # building a delayed processing backlog.
+                # 用本地视频模拟摄像头时，要尽量贴近真实实时流：
+                # 既不能比墙钟时间更快，也要主动跳过过期帧，避免越积越慢。
                 wall_elapsed_s = time.perf_counter() - session_start_time
                 target_capture_frame = int(wall_elapsed_s * fps)
                 if total_capture_frames > 0:
@@ -683,13 +714,34 @@ def run_camera_coach(
                 frame = cv2.flip(frame, 1)
 
             query_view = frame.copy()
-            timestamp_ms = int((frame_idx * 1000.0) / fps)
-            norm_pts, raw_pts, prev_center = detect_pose_in_frame(
-                landmarker=landmarker,
-                frame=frame,
-                timestamp_ms=timestamp_ms,
-                prev_center=prev_center,
-            )
+            current_frame_idx = int(frame_idx)
+            current_time_s = float(frame_idx / fps)
+            if use_async_live_stream:
+                # 异步模式下持续提交新帧，只消费最近一次完成的推理结果。
+                timestamp_ms = int(round(current_time_s * 1000.0))
+                landmarker.submit_frame(
+                    frame=frame,
+                    timestamp_ms=timestamp_ms,
+                    frame_idx=current_frame_idx,
+                    frame_time_s=current_time_s,
+                )
+                latest_result = landmarker.pop_latest_result()
+                if latest_result is None:
+                    frame_idx += 1
+                    continue
+                query_view = latest_result["frame"]
+                current_frame_idx = int(latest_result["frame_idx"])
+                current_time_s = float(latest_result["frame_time_s"])
+                norm_pts = latest_result["norm_pts"]
+                raw_pts = latest_result["raw_pts"]
+            else:
+                timestamp_ms = int((frame_idx * 1000.0) / fps)
+                norm_pts, raw_pts, prev_center = detect_pose_in_frame(
+                    landmarker=landmarker,
+                    frame=frame,
+                    timestamp_ms=timestamp_ms,
+                    prev_center=prev_center,
+                )
 
             if raw_pts is not None and norm_pts is not None:
                 accepted_hint: Optional[dict[str, Any]] = None
@@ -702,7 +754,7 @@ def run_camera_coach(
                     feature_std=ref_data["feature_std"],
                 )
 
-                elapsed_s = float(frame_idx / fps) if use_video_timeline else time.perf_counter() - session_start_time
+                elapsed_s = current_time_s if use_video_timeline else time.perf_counter() - session_start_time
                 if ref_times.size:
                     target_time_s = min(float(elapsed_s), float(ref_times[-1]))
                     target_ref_seq_idx = int(np.searchsorted(ref_times, target_time_s, side="left"))
@@ -766,8 +818,8 @@ def run_camera_coach(
                     and (processed_idx - last_hint_processed_idx) >= int(hint_min_interval)
                 ):
                     accepted_hint = {
-                        "query_frame": int(frame_idx),
-                        "query_time_s": float(frame_idx / fps),
+                        "query_frame": int(current_frame_idx),
+                        "query_time_s": float(current_time_s),
                         "phase_name": latest_phase_name,
                         "cue": latest_phase_cue,
                         "substage_key": latest_substage_key,
@@ -824,7 +876,7 @@ def run_camera_coach(
                     part=latest_part,
                     local_error=latest_local_err,
                     active_hint=active_hint,
-                    query_time_s=float(frame_idx / fps),
+                    query_time_s=float(current_time_s),
                 )
                 if cv2.imwrite(image_path, error_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90]):
                     accepted_hint["error_frame_path"] = image_path
@@ -853,8 +905,8 @@ def run_camera_coach(
             if state_callback is not None:
                 state_callback(
                     {
-                        "query_frame": int(frame_idx),
-                        "query_time_s": float(frame_idx / fps),
+                        "query_frame": int(current_frame_idx),
+                        "query_time_s": float(current_time_s),
                         "ref_frame": int(ref_data["frame_indices"][current_ref_seq_idx]) if ref_length else 0,
                         "ref_time_s": float(ref_data["time_s"][current_ref_seq_idx]) if ref_times.size else 0.0,
                         "phase_name": latest_phase_name,
@@ -890,9 +942,9 @@ def run_camera_coach(
                     active_hint=hint_text,
                     align_info={
                         "ref_frame": int(ref_data["frame_indices"][current_ref_seq_idx]),
-                        "qry_frame": int(frame_idx),
+                        "qry_frame": int(current_frame_idx),
                         "ref_seq_idx": int(current_ref_seq_idx),
-                        "qry_seq_idx": int(frame_idx),
+                        "qry_seq_idx": int(current_frame_idx),
                         "path_step": int(current_ref_seq_idx),
                         "path_total": int(ref_data["features"].shape[0]),
                     },

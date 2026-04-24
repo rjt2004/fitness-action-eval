@@ -8,6 +8,8 @@ from fitness_action_eval.model_options import DEFAULT_RUNTIME_MODEL_KEY, get_pos
 
 
 class EvaluationTask(models.Model):
+    """离线评估任务主表，记录上传视频、参数和最终结果。"""
+
     class Status(models.TextChoices):
         PENDING = "pending", "待处理"
         RUNNING = "running", "处理中"
@@ -25,27 +27,35 @@ class EvaluationTask(models.Model):
         TemplateVideo,
         on_delete=models.PROTECT,
         related_name="evaluation_tasks",
-        verbose_name="模板",
+        verbose_name="参考模板",
     )
     task_name = models.CharField(max_length=100, blank=True, default="", verbose_name="任务名称")
     query_video = models.FileField(upload_to="evaluation_center/query/", verbose_name="待评估视频")
     result_json_path = models.CharField(max_length=255, blank=True, default="", verbose_name="结果 JSON 路径")
     result_plot_path = models.CharField(max_length=255, blank=True, default="", verbose_name="结果图路径")
     result_video_path = models.CharField(max_length=255, blank=True, default="", verbose_name="结果视频路径")
+
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, verbose_name="状态")
     score = models.DecimalField(max_digits=6, decimal_places=2, default=0, verbose_name="得分")
     normalized_distance = models.DecimalField(max_digits=10, decimal_places=4, default=0, verbose_name="归一化距离")
     hint_count = models.PositiveIntegerField(default=0, verbose_name="提示数量")
-    export_video = models.BooleanField(default=False, verbose_name="是否导出视频")
+
+    export_video = models.BooleanField(default=False, verbose_name="是否导出对比视频")
     max_hints = models.PositiveIntegerField(default=40, verbose_name="提示上限")
     hint_threshold = models.DecimalField(max_digits=6, decimal_places=3, default=0.180, verbose_name="提示阈值")
     hint_min_interval = models.PositiveIntegerField(default=8, verbose_name="提示最小间隔")
     score_scale = models.DecimalField(max_digits=6, decimal_places=2, default=8.00, verbose_name="评分尺度")
-    frame_stride = models.PositiveIntegerField(default=1, verbose_name="待测视频抽帧步长")
-    smooth_window = models.PositiveIntegerField(default=5, verbose_name="待测视频平滑窗口")
-    pose_model = models.CharField(max_length=20, choices=get_pose_model_choices(include_follow_template=True), default=DEFAULT_RUNTIME_MODEL_KEY, verbose_name="姿态模型")
+    frame_stride = models.PositiveIntegerField(default=1, verbose_name="抽帧步长")
+    smooth_window = models.PositiveIntegerField(default=5, verbose_name="平滑窗口")
+    pose_model = models.CharField(
+        max_length=20,
+        choices=get_pose_model_choices(include_follow_template=True),
+        default=DEFAULT_RUNTIME_MODEL_KEY,
+        verbose_name="姿态模型",
+    )
+
     progress_percent = models.PositiveIntegerField(default=0, verbose_name="进度百分比")
-    progress_text = models.CharField(max_length=100, blank=True, default="", verbose_name="进度文本")
+    progress_text = models.CharField(max_length=100, blank=True, default="", verbose_name="进度说明")
     error_message = models.TextField(blank=True, default="", verbose_name="错误信息")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
     started_at = models.DateTimeField(null=True, blank=True, verbose_name="开始时间")
@@ -54,8 +64,8 @@ class EvaluationTask(models.Model):
 
     class Meta:
         db_table = "evaluation_task"
-        verbose_name = "评估任务"
-        verbose_name_plural = "评估任务"
+        verbose_name = "离线评估任务"
+        verbose_name_plural = "离线评估任务"
         ordering = ["-id"]
 
     def __str__(self) -> str:
@@ -63,6 +73,8 @@ class EvaluationTask(models.Model):
 
 
 class EvaluationPhaseResult(models.Model):
+    """缓存分阶段结果，便于详情页直接展示各阶段时间范围。"""
+
     task = models.ForeignKey(
         EvaluationTask,
         on_delete=models.CASCADE,
@@ -73,9 +85,9 @@ class EvaluationPhaseResult(models.Model):
     phase_id = models.IntegerField(verbose_name="阶段编号")
     phase_name = models.CharField(max_length=100, verbose_name="阶段名称")
     cue = models.CharField(max_length=255, blank=True, default="", verbose_name="动作要领")
-    start_seq_idx = models.IntegerField(default=0, verbose_name="开始序列下标")
-    end_seq_idx = models.IntegerField(default=0, verbose_name="结束序列下标")
-    start_time_s = models.DecimalField(max_digits=10, decimal_places=3, default=0, verbose_name="开始时间")
+    start_seq_idx = models.IntegerField(default=0, verbose_name="起始序列索引")
+    end_seq_idx = models.IntegerField(default=0, verbose_name="结束序列索引")
+    start_time_s = models.DecimalField(max_digits=10, decimal_places=3, default=0, verbose_name="起始时间")
     end_time_s = models.DecimalField(max_digits=10, decimal_places=3, default=0, verbose_name="结束时间")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
 
@@ -90,18 +102,20 @@ class EvaluationPhaseResult(models.Model):
 
 
 class EvaluationHint(models.Model):
+    """缓存离线评估中的纠错提示列表。"""
+
     task = models.ForeignKey(
         EvaluationTask,
         on_delete=models.CASCADE,
         related_name="hints",
         verbose_name="所属任务",
     )
-    phase_id = models.IntegerField(null=True, blank=True, verbose_name="阶段编号")
-    phase_name = models.CharField(max_length=100, blank=True, default="", verbose_name="阶段名称")
+    phase_id = models.IntegerField(null=True, blank=True, verbose_name="参考阶段编号")
+    phase_name = models.CharField(max_length=100, blank=True, default="", verbose_name="参考阶段名称")
     cue = models.CharField(max_length=255, blank=True, default="", verbose_name="动作要领")
     query_phase_id = models.IntegerField(null=True, blank=True, verbose_name="测试阶段编号")
-    ref_index = models.IntegerField(default=0, verbose_name="参考序列下标")
-    query_index = models.IntegerField(default=0, verbose_name="测试序列下标")
+    ref_index = models.IntegerField(default=0, verbose_name="参考序列索引")
+    query_index = models.IntegerField(default=0, verbose_name="测试序列索引")
     query_frame = models.IntegerField(default=0, verbose_name="测试帧号")
     query_time_s = models.DecimalField(max_digits=10, decimal_places=3, default=0, verbose_name="测试时间")
     ref_time_s = models.DecimalField(max_digits=10, decimal_places=3, default=0, verbose_name="参考时间")

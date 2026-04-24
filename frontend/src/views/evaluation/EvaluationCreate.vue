@@ -14,6 +14,7 @@ const selectedTemplate = ref(null);
 const poseModelOptions = ref([]);
 const queryVideo = ref(null);
 
+// 离线评估默认参数偏向更稳定的结果展示，适合完整视频评分。
 const form = reactive({
   template_id: "",
   task_name: "离线评估任务",
@@ -59,6 +60,7 @@ async function loadTemplateDetail(templateId) {
   try {
     selectedTemplate.value = await getTemplateDetail(templateId);
     if (selectedTemplate.value) {
+      // 新任务默认参考模板参数，再稍微向离线评估的稳定性倾斜。
       form.frame_stride = Math.max(selectedTemplate.value.frame_stride || 4, 6);
       form.smooth_window = Math.min(selectedTemplate.value.smooth_window || 5, 3);
       form.pose_model = "follow_template";

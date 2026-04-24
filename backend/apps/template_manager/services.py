@@ -4,12 +4,11 @@ import threading
 from pathlib import Path
 
 from django.conf import settings
-from django.db import close_old_connections
-from django.db import transaction
+from django.db import close_old_connections, transaction
 from django.utils import timezone
 
-from fitness_action_eval.pipeline import save_pose_template
 from fitness_action_eval.model_options import resolve_pose_model_path
+from fitness_action_eval.pipeline import save_pose_template
 
 from .models import ActionCategory, FileAsset, TemplateVideo
 
@@ -18,6 +17,8 @@ _TEMPLATE_BUILD_LOCK = threading.Lock()
 
 
 def ensure_default_baduanjin_category() -> ActionCategory:
+    """确保系统内始终存在默认的八段锦动作分类。"""
+
     category, created = ActionCategory.objects.get_or_create(
         code="BADUANJIN",
         defaults={
@@ -43,6 +44,8 @@ def ensure_default_baduanjin_category() -> ActionCategory:
 
 
 def register_source_asset(template: TemplateVideo) -> FileAsset:
+    """登记模板源视频。"""
+
     file_name = Path(template.source_video.name).name
     return FileAsset.objects.create(
         biz_type=FileAsset.BizType.TEMPLATE_SOURCE,
@@ -55,6 +58,8 @@ def register_source_asset(template: TemplateVideo) -> FileAsset:
 
 
 def _update_template_progress(template_id: int, percent: int, text: str) -> None:
+    """模板提取过程中回写进度条。"""
+
     TemplateVideo.objects.filter(id=template_id).update(
         progress_percent=max(0, min(100, int(percent))),
         progress_text=str(text),
@@ -63,6 +68,8 @@ def _update_template_progress(template_id: int, percent: int, text: str) -> None
 
 
 def build_template_file(template: TemplateVideo, progress_callback=None) -> TemplateVideo:
+    """调用算法端从标准视频中提取姿态模板文件。"""
+
     generated_dir = Path(settings.MEDIA_ROOT) / "template_center" / "generated"
     generated_dir.mkdir(parents=True, exist_ok=True)
     output_path = generated_dir / f"template_{template.id}_{template.version}.npz"
@@ -106,6 +113,8 @@ def build_template_file(template: TemplateVideo, progress_callback=None) -> Temp
 
 
 def _run_template_build_worker(template_id: int) -> None:
+    """后台线程：生成模板文件。"""
+
     close_old_connections()
     try:
         template = TemplateVideo.objects.get(id=template_id)
@@ -130,6 +139,8 @@ def _run_template_build_worker(template_id: int) -> None:
 
 
 def start_template_build(template: TemplateVideo) -> TemplateVideo:
+    """启动模板生成线程。"""
+
     TemplateVideo.objects.filter(id=template.id).update(
         status=TemplateVideo.Status.BUILDING,
         progress_percent=0,
@@ -151,11 +162,16 @@ def start_template_build(template: TemplateVideo) -> TemplateVideo:
 
 
 def delete_template_bundle(template: TemplateVideo) -> None:
+    """删除模板记录及其关联文件。"""
+
     source_storage = template.source_video.storage
     source_name = template.source_video.name
     asset_paths = {
         item.file_path
-        for item in FileAsset.objects.filter(biz_id=template.id, biz_type__in=[FileAsset.BizType.TEMPLATE_SOURCE, FileAsset.BizType.TEMPLATE_FILE])
+        for item in FileAsset.objects.filter(
+            biz_id=template.id,
+            biz_type__in=[FileAsset.BizType.TEMPLATE_SOURCE, FileAsset.BizType.TEMPLATE_FILE],
+        )
         if item.file_path
     }
     if template.template_file_path:

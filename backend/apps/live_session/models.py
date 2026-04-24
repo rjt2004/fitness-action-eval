@@ -8,6 +8,8 @@ from fitness_action_eval.model_options import get_pose_model_choices
 
 
 class LiveSession(models.Model):
+    """实时跟练会话记录。"""
+
     class Status(models.TextChoices):
         PENDING = "pending", "待启动"
         RUNNING = "running", "运行中"
@@ -27,26 +29,32 @@ class LiveSession(models.Model):
         TemplateVideo,
         on_delete=models.PROTECT,
         related_name="live_sessions",
-        verbose_name="模板",
+        verbose_name="动作模板",
     )
     session_name = models.CharField(max_length=100, blank=True, default="", verbose_name="会话名称")
-    camera_source = models.CharField(max_length=255, default="0", verbose_name="摄像头来源")
-    camera_width = models.PositiveIntegerField(null=True, blank=True, verbose_name="摄像头宽度")
-    camera_height = models.PositiveIntegerField(null=True, blank=True, verbose_name="摄像头高度")
+
+    camera_source = models.CharField(max_length=255, default="0", verbose_name="视频源")
+    camera_width = models.PositiveIntegerField(null=True, blank=True, verbose_name="视频宽度")
+    camera_height = models.PositiveIntegerField(null=True, blank=True, verbose_name="视频高度")
     camera_mirror = models.BooleanField(default=True, verbose_name="是否镜像")
-    preview = models.BooleanField(default=False, verbose_name="是否本地预览")
-    export_video = models.BooleanField(default=False, verbose_name="是否导出视频")
+
     capture_error_frames = models.BooleanField(default=True, verbose_name="是否保存错误动作帧")
     error_frame_count = models.PositiveIntegerField(default=0, verbose_name="错误动作帧数量")
+
     frame_stride = models.PositiveIntegerField(default=1, verbose_name="抽帧步长")
     smooth_window = models.PositiveIntegerField(default=1, verbose_name="平滑窗口")
-    pose_model = models.CharField(max_length=20, choices=get_pose_model_choices(include_follow_template=True), default="lite", verbose_name="姿态模型")
+    pose_model = models.CharField(
+        max_length=20,
+        choices=get_pose_model_choices(include_follow_template=True),
+        default="lite",
+        verbose_name="姿态模型",
+    )
     score_scale = models.DecimalField(max_digits=6, decimal_places=2, default=8.00, verbose_name="评分尺度")
     hint_threshold = models.DecimalField(max_digits=6, decimal_places=3, default=0.200, verbose_name="提示阈值")
     hint_min_interval = models.PositiveIntegerField(default=60, verbose_name="提示最小间隔")
     max_hints = models.PositiveIntegerField(default=360, verbose_name="提示上限")
     ref_search_window = models.PositiveIntegerField(default=60, verbose_name="模板搜索窗口")
-    max_frames = models.PositiveIntegerField(null=True, blank=True, verbose_name="最大处理帧数")
+
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, verbose_name="状态")
     summary_json_path = models.CharField(max_length=255, blank=True, default="", verbose_name="摘要 JSON 路径")
     output_video_path = models.CharField(max_length=255, blank=True, default="", verbose_name="输出视频路径")
@@ -56,6 +64,7 @@ class LiveSession(models.Model):
     final_phase_cue = models.CharField(max_length=255, blank=True, default="", verbose_name="最终动作要领")
     final_part = models.CharField(max_length=50, blank=True, default="", verbose_name="最终关注部位")
     error_message = models.TextField(blank=True, default="", verbose_name="错误信息")
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
     started_at = models.DateTimeField(null=True, blank=True, verbose_name="开始时间")
     ended_at = models.DateTimeField(null=True, blank=True, verbose_name="结束时间")

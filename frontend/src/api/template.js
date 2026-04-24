@@ -1,5 +1,6 @@
 import request from "@/utils/request";
 
+// 模板中心接口。
 export function getTemplateList() {
   return request.get("/api/template-center/templates/");
 }

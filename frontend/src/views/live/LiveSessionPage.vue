@@ -18,6 +18,7 @@ let timer = null;
 let previewCounter = 0;
 let leaveStopping = false;
 
+// 这一组参数优先保证实时性，适合真实摄像头或视频模拟摄像头跟练。
 const REALTIME_DEFAULTS = {
   camera_width: 480,
   camera_height: 270,
@@ -55,10 +56,10 @@ const realtimeInfo = computed(() => {
 });
 
 const realtimeMessage = computed(() => {
-  if (!currentSession.value?.id) return "开始跟练后，这里会显示实时纠错提示";
+  if (!currentSession.value?.id) return "开始跟练后，这里会显示实时纠错提示。";
   if (realtimeInfo.value.message) return realtimeInfo.value.message;
-  if (sessionActive.value) return "当前动作保持较好，继续跟随参考视频";
-  return "本次会话已结束";
+  if (sessionActive.value) return "当前动作保持较好，请继续跟随参考视频。";
+  return "本次会话已结束。";
 });
 
 function toMediaUrl(path) {
@@ -147,7 +148,7 @@ async function refreshPreviewFrame(sessionId) {
     previewFrameUrl.value = nextUrl;
     if (prevUrl) URL.revokeObjectURL(prevUrl);
   } catch {
-    // 会话启动初期预览帧可能暂时为空，忽略即可。
+    // 会话刚启动时可能暂时没有预览帧，这里直接忽略。
   }
 }
 
@@ -157,6 +158,7 @@ function startPolling(sessionId) {
   timer = window.setInterval(async () => {
     previewCounter += 1;
     await refreshPreviewFrame(sessionId);
+    // 详情轮询频率低于预览轮询，避免给后端线程增加过多压力。
     if (previewCounter % 4 === 0) {
       const data = await getLiveSessionDetail(sessionId);
       currentSession.value = data;
@@ -179,7 +181,6 @@ async function handleStart() {
       camera_width: form.camera_width,
       camera_height: form.camera_height,
       camera_mirror: form.camera_mirror,
-      preview: false,
       capture_error_frames: form.capture_error_frames,
       frame_stride: form.frame_stride,
       smooth_window: form.smooth_window,

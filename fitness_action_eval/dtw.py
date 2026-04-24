@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""DTW 对齐与分数映射工具。
+
+这里的 DTW 使用带宽约束来限制搜索区域，避免长视频直接做全矩阵对齐时
+计算量过大，同时仍允许标准动作和测试动作存在一定节奏差异。
+"""
+
 from typing import List, Tuple
 
 import numpy as np
@@ -10,13 +16,15 @@ def dtw_distance_multidim(
     b: np.ndarray,
     window_ratio: float = 0.12,
 ) -> Tuple[float, List[Tuple[int, int]]]:
-    # 使用带带宽约束的 DTW 对两段动作序列进行对齐，兼容节奏差异并降低长视频计算量。
+    """计算两个多维序列的 DTW 距离和对齐路径。"""
+
     if a.ndim != 2 or b.ndim != 2:
         raise ValueError("dtw_distance_multidim expects (T,D) sequences.")
     n, m = a.shape[0], b.shape[0]
     if n == 0 or m == 0:
         return float("inf"), []
 
+    # 带宽至少覆盖长度差，并根据比例额外留出节奏漂移空间。
     band = int(max(abs(n - m), round(max(n, m) * max(0.01, window_ratio))))
     dp = np.full((n + 1, m + 1), np.inf, dtype=np.float32)
     trace = np.full((n + 1, m + 1, 2), -1, dtype=np.int32)
@@ -58,6 +66,7 @@ def dtw_distance_multidim(
 
 
 def distance_to_score(norm_dist: float, score_scale: float) -> float:
-    # 将归一化 DTW 距离映射到 0-100 分，距离越小得分越高。
+    """把归一化距离映射到 0-100 分，距离越小分数越高。"""
+
     score = 100.0 * (1.0 - (norm_dist / max(1e-6, score_scale)))
     return float(np.clip(score, 0.0, 100.0))

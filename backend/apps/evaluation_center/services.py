@@ -24,10 +24,14 @@ _TASK_LOCK = threading.Lock()
 
 
 def generate_task_no() -> str:
+    """生成离线评估任务编号。"""
+
     return f"EVAL{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid4().hex[:6].upper()}"
 
 
 def task_registry_status(task_id: int) -> dict[str, object]:
+    """查询后台线程是否仍在运行。"""
+
     with _TASK_LOCK:
         entry = _TASK_REGISTRY.get(task_id)
     if not entry:
@@ -39,6 +43,8 @@ def task_registry_status(task_id: int) -> dict[str, object]:
 
 
 def _result_paths(task: EvaluationTask) -> tuple[Path, Path, Path, Path]:
+    """为每个任务固定结果目录，便于后续清理和回显。"""
+
     result_dir = Path(settings.MEDIA_ROOT) / "evaluation_center" / "results" / task.task_no
     result_dir.mkdir(parents=True, exist_ok=True)
     return (
@@ -50,6 +56,8 @@ def _result_paths(task: EvaluationTask) -> tuple[Path, Path, Path, Path]:
 
 
 def _update_progress(task_id: int, percent: int, text: str) -> None:
+    """后台线程推进进度时同步更新数据库。"""
+
     EvaluationTask.objects.filter(id=task_id).update(
         progress_percent=max(0, min(100, int(percent))),
         progress_text=str(text),
@@ -58,6 +66,8 @@ def _update_progress(task_id: int, percent: int, text: str) -> None:
 
 
 def _prepare_result_video(out_video_raw: Path, out_video_web: Path) -> Path:
+    """尽量把 OpenCV 输出的视频转成浏览器更易播放的 MP4。"""
+
     if not out_video_raw.exists():
         return out_video_web
     try:
@@ -71,6 +81,8 @@ def _prepare_result_video(out_video_raw: Path, out_video_web: Path) -> Path:
 
 
 def register_evaluation_asset(task: EvaluationTask, biz_type: str, file_path: str) -> None:
+    """把输入视频、结果图、结果 JSON 等登记到文件资产表。"""
+
     path = Path(file_path)
     FileAsset.objects.update_or_create(
         biz_type=biz_type,
@@ -85,6 +97,8 @@ def register_evaluation_asset(task: EvaluationTask, biz_type: str, file_path: st
 
 
 def load_result_payload(task: EvaluationTask) -> dict:
+    """从结果 JSON 中读取评估摘要。"""
+
     if not task.result_json_path:
         return {}
     path = Path(task.result_json_path)
@@ -94,6 +108,8 @@ def load_result_payload(task: EvaluationTask) -> dict:
 
 
 def persist_result_details(task: EvaluationTask) -> None:
+    """把 JSON 中的阶段结果和提示结果拆到数据库中，便于详情页查询。"""
+
     payload = load_result_payload(task)
     if not payload:
         return
@@ -149,6 +165,8 @@ def persist_result_details(task: EvaluationTask) -> None:
 
 
 def _finalize_success(task: EvaluationTask, out_json: Path, out_plot: Path, out_video_web: Path) -> None:
+    """任务成功后统一回填数据库和资产表。"""
+
     payload = json.loads(out_json.read_text(encoding="utf-8"))
     task.result_json_path = str(out_json)
     task.result_plot_path = str(out_plot)
@@ -186,6 +204,8 @@ def _finalize_success(task: EvaluationTask, out_json: Path, out_plot: Path, out_
 
 
 def repair_stale_task(task: EvaluationTask) -> EvaluationTask:
+    """修复因服务重启或线程中断导致的悬挂任务状态。"""
+
     if task.status not in {EvaluationTask.Status.PENDING, EvaluationTask.Status.RUNNING}:
         return task
     if task_registry_status(task.id)["active"]:
@@ -205,7 +225,7 @@ def repair_stale_task(task: EvaluationTask) -> EvaluationTask:
 
     if task.started_at and (datetime.now() - task.started_at).total_seconds() > 300:
         task.status = EvaluationTask.Status.FAILED
-        task.progress_text = "任务中断，请重新提交"
+        task.progress_text = "任务已中断，请重新提交"
         task.error_message = task.error_message or "任务未完成且没有找到结果文件。"
         task.finished_at = datetime.now()
         task.save(update_fields=["status", "progress_text", "error_message", "finished_at", "updated_at"])
@@ -213,6 +233,8 @@ def repair_stale_task(task: EvaluationTask) -> EvaluationTask:
 
 
 def _run_evaluation_task_worker(task_id: int) -> None:
+    """后台线程：执行离线评估主流程。"""
+
     close_old_connections()
     try:
         task = EvaluationTask.objects.select_related("template", "user").get(id=task_id)
@@ -272,6 +294,8 @@ def _run_evaluation_task_worker(task_id: int) -> None:
 
 
 def start_evaluation_task(task: EvaluationTask) -> EvaluationTask:
+    """创建后台线程执行离线评估。"""
+
     thread = threading.Thread(
         target=_run_evaluation_task_worker,
         args=(task.id,),
@@ -285,6 +309,8 @@ def start_evaluation_task(task: EvaluationTask) -> EvaluationTask:
 
 
 def _safe_remove_path(path_str: str) -> None:
+    """仅允许删除 MEDIA_ROOT 下的文件，避免误删其他目录。"""
+
     if not path_str:
         return
     path = Path(path_str)
@@ -304,6 +330,8 @@ def _safe_remove_path(path_str: str) -> None:
 
 
 def delete_evaluation_task(task: EvaluationTask) -> None:
+    """删除已完成的离线评估任务及其关联文件。"""
+
     if task.status in {EvaluationTask.Status.PENDING, EvaluationTask.Status.RUNNING}:
         raise ValueError("运行中的评估任务请等待完成后再删除。")
 

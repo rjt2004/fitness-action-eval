@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+"""姿态提取与实时检测工具。"""
+
 from collections import deque
+import threading
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import cv2
@@ -14,7 +17,8 @@ from fitness_action_eval.visualization import close_preview_windows, draw_pose_s
 
 
 def moving_average_matrix(x: np.ndarray, k: int) -> np.ndarray:
-    # 对时间序列特征做滑动平均，减小关键点抖动带来的噪声。
+    """对时序特征做滑动平均，减小关键点抖动。"""
+
     if x.ndim != 2:
         raise ValueError("moving_average_matrix expects shape (T, D).")
     if k <= 1 or x.shape[0] < k:
@@ -31,7 +35,8 @@ def moving_average_matrix(x: np.ndarray, k: int) -> np.ndarray:
 
 
 def normalize_matrix(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    # 对每一维特征做标准化，使不同关键点维度具有可比性。
+    """逐维标准化特征矩阵，便于后续距离计算。"""
+
     if x.ndim != 2:
         raise ValueError("normalize_matrix expects shape (T, D).")
     mu = np.mean(x, axis=0, keepdims=True).astype(np.float32)
@@ -42,7 +47,8 @@ def normalize_matrix(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]
 def pose_bbox(
     landmarks, width: int, height: int
 ) -> Tuple[int, int, int, int, float, float, float]:
-    # 根据当前姿态关键点计算包围框、中心点和面积，用于多人场景下的人体目标筛选。
+    """根据关键点计算候选人体的外接框和中心点。"""
+
     xs = [lm.x * width for lm in landmarks]
     ys = [lm.y * height for lm in landmarks]
     x1, x2 = int(min(xs)), int(max(xs))
@@ -59,7 +65,8 @@ def select_target_pose(
     height: int,
     prev_center: Optional[Tuple[float, float]],
 ):
-    # 在检测到多人时，优先选择面积较大、靠近画面中心且与上一帧位置连续的人体。
+    """在多人结果中选出最可能是当前练习者的目标。"""
+
     if not pose_landmarks:
         return None, prev_center
 
@@ -90,7 +97,8 @@ def select_target_pose(
 
 
 def normalize_pose_points(points: np.ndarray) -> Optional[np.ndarray]:
-    # 以髋部中心为原点、躯干长度为尺度做归一化，降低人物位置与身高差异的影响。
+    """以髋部中心和躯干尺度做归一化，减弱远近与身材差异。"""
+
     if points.shape != (33, 2):
         return None
     hip_center = (points[23] + points[24]) / 2.0
@@ -102,33 +110,20 @@ def normalize_pose_points(points: np.ndarray) -> Optional[np.ndarray]:
     return norm.astype(np.float32)
 
 
-def create_pose_landmarker(
-    task_model: str,
-    num_poses: int,
-    running_mode: mp_tasks_vision.RunningMode = mp_tasks_vision.RunningMode.VIDEO,
-) -> mp_tasks_vision.PoseLandmarker:
-    options = mp_tasks_vision.PoseLandmarkerOptions(
-        base_options=mp_tasks_python.BaseOptions(model_asset_path=task_model),
-        running_mode=running_mode,
-        min_pose_detection_confidence=0.5,
-        min_pose_presence_confidence=0.5,
-        min_tracking_confidence=0.5,
-        num_poses=max(1, num_poses),
-    )
-    return mp_tasks_vision.PoseLandmarker.create_from_options(options)
-
-
-def detect_pose_in_frame(
-    landmarker: mp_tasks_vision.PoseLandmarker,
-    frame: np.ndarray,
-    timestamp_ms: int,
+def _extract_pose_points(
+    pose_landmarks,
+    width: int,
+    height: int,
     prev_center: Optional[Tuple[float, float]],
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[Tuple[float, float]]]:
-    height, width = frame.shape[:2]
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-    result = landmarker.detect_for_video(mp_image, int(timestamp_ms))
-    target, prev_center = select_target_pose(result.pose_landmarks, width=width, height=height, prev_center=prev_center)
+    """把 MediaPipe 原始结果转换成归一化点和原始点。"""
+
+    target, prev_center = select_target_pose(
+        pose_landmarks,
+        width=width,
+        height=height,
+        prev_center=prev_center,
+    )
     if target is None or len(target) < 33:
         return None, None, prev_center
 
@@ -142,7 +137,149 @@ def detect_pose_in_frame(
     return norm, pts, prev_center
 
 
+def create_pose_landmarker(
+    task_model: str,
+    num_poses: int,
+    running_mode: mp_tasks_vision.RunningMode = mp_tasks_vision.RunningMode.VIDEO,
+    result_callback: Optional[Callable[[Any, mp.Image, int], None]] = None,
+) -> mp_tasks_vision.PoseLandmarker:
+    """创建 Pose Landmarker。
+
+    离线流程默认使用 VIDEO 模式；
+    实时流程会切到 LIVE_STREAM 模式，并通过回调异步拿结果。
+    """
+
+    options = mp_tasks_vision.PoseLandmarkerOptions(
+        base_options=mp_tasks_python.BaseOptions(model_asset_path=task_model),
+        running_mode=running_mode,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+        num_poses=max(1, num_poses),
+        result_callback=result_callback,
+    )
+    return mp_tasks_vision.PoseLandmarker.create_from_options(options)
+
+
+def detect_pose_in_frame(
+    landmarker: mp_tasks_vision.PoseLandmarker,
+    frame: np.ndarray,
+    timestamp_ms: int,
+    prev_center: Optional[Tuple[float, float]],
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[Tuple[float, float]]]:
+    """同步检测单帧姿态，主要用于离线视频处理。"""
+
+    height, width = frame.shape[:2]
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    result = landmarker.detect_for_video(mp_image, int(timestamp_ms))
+    return _extract_pose_points(result.pose_landmarks, width=width, height=height, prev_center=prev_center)
+
+
+class LiveStreamPoseDetector:
+    """实时模式下的异步姿态检测器。
+
+    调用方通常只消费最近一次完成的结果，以更低延迟换取少量丢帧。
+    """
+
+    def __init__(self, task_model: str, num_poses: int):
+        self._lock = threading.Lock()
+        self._pending_frames: Dict[int, Dict[str, Any]] = {}
+        self._results: Deque[Dict[str, Any]] = deque()
+        self._prev_center: Optional[Tuple[float, float]] = None
+        self._landmarker = create_pose_landmarker(
+            task_model=task_model,
+            num_poses=num_poses,
+            running_mode=mp_tasks_vision.RunningMode.LIVE_STREAM,
+            result_callback=self._handle_result,
+        )
+
+    def close(self) -> None:
+        """关闭底层 landmarker。"""
+
+        self._landmarker.close()
+
+    def __enter__(self) -> "LiveStreamPoseDetector":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def _handle_result(self, result, output_image: mp.Image, timestamp_ms: int) -> None:
+        """接收异步回调结果，并把可用结果压入队列。"""
+
+        timestamp_ms = int(timestamp_ms)
+        with self._lock:
+            meta = self._pending_frames.pop(timestamp_ms, None)
+            prev_center = self._prev_center
+        if meta is None:
+            return
+
+        norm_pts, raw_pts, next_center = _extract_pose_points(
+            result.pose_landmarks,
+            width=int(meta["width"]),
+            height=int(meta["height"]),
+            prev_center=prev_center,
+        )
+
+        payload = {
+            "timestamp_ms": timestamp_ms,
+            "frame_idx": int(meta["frame_idx"]),
+            "frame_time_s": float(meta["frame_time_s"]),
+            "frame": meta["frame"],
+            "norm_pts": norm_pts,
+            "raw_pts": raw_pts,
+        }
+        with self._lock:
+            self._prev_center = next_center
+            self._results.append(payload)
+
+    def submit_frame(
+        self,
+        frame: np.ndarray,
+        *,
+        timestamp_ms: int,
+        frame_idx: int,
+        frame_time_s: float,
+    ) -> None:
+        """提交一帧给异步检测器，并清理过旧任务。"""
+
+        height, width = frame.shape[:2]
+        timestamp_ms = int(timestamp_ms)
+        with self._lock:
+            self._pending_frames[timestamp_ms] = {
+                "width": int(width),
+                "height": int(height),
+                "frame_idx": int(frame_idx),
+                "frame_time_s": float(frame_time_s),
+                "frame": frame.copy(),
+            }
+            stale_cutoff = timestamp_ms - 2000
+            stale_keys = [key for key in self._pending_frames.keys() if key < stale_cutoff]
+            for key in stale_keys:
+                self._pending_frames.pop(key, None)
+            while len(self._pending_frames) > 6:
+                oldest_key = min(self._pending_frames.keys())
+                self._pending_frames.pop(oldest_key, None)
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        self._landmarker.detect_async(mp_image, timestamp_ms)
+
+    def pop_latest_result(self) -> Optional[Dict[str, Any]]:
+        """只保留最新完成结果，主动丢弃更旧结果。"""
+
+        with self._lock:
+            if not self._results:
+                return None
+            latest = self._results[-1]
+            self._results.clear()
+        return latest
+
+
 def build_pose_feature_bundle(points: np.ndarray) -> Dict[str, np.ndarray]:
+    """把骨架点展开成离线评分所需的完整特征包。"""
+
     flat_points = points.reshape(points.shape[0], -1).astype(np.float32)
     angle_features = compute_joint_angle_sequence(points)
     combined_raw = np.concatenate([flat_points, angle_features], axis=1).astype(np.float32)
@@ -163,6 +300,8 @@ def build_current_feature(
     feature_mean: Optional[np.ndarray] = None,
     feature_std: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """根据最近若干帧构造当前时刻的实时特征。"""
+
     if not recent_points:
         raise ValueError("recent_points must contain at least one pose.")
 
@@ -192,7 +331,8 @@ def extract_pose_sequence(
     progress_range: Tuple[int, int] = (0, 100),
     progress_message: str = "正在提取视频姿态",
 ) -> Dict[str, Any]:
-    # 从视频中提取逐帧姿态序列，并生成后续 DTW 所需的标准化特征。
+    """从视频中提取姿态序列，并生成后续 DTW 所需的特征。"""
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise FileNotFoundError(f"Cannot open video: {video_path}")

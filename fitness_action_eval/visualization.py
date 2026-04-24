@@ -1,3 +1,5 @@
+"""可视化与视频渲染工具。"""
+
 import os
 from functools import lru_cache
 from typing import Callable, Dict, List, Optional, Tuple

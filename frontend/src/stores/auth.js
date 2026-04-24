@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 
 const STORAGE_KEY = "fitness_action_eval_auth";
 
+// 登录状态存储。页面刷新后会从 localStorage 恢复。
 export const useAuthStore = defineStore("auth", {
   state: () => ({
     accessToken: "",

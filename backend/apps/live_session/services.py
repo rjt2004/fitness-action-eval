@@ -12,7 +12,6 @@ import cv2
 from django.conf import settings
 from django.db import close_old_connections
 
-from config.video_utils import transcode_to_browser_mp4
 from fitness_action_eval.model_options import FOLLOW_TEMPLATE_MODEL_KEY, resolve_pose_model_path
 from fitness_action_eval.pipeline import run_camera_coach
 
@@ -24,16 +23,25 @@ _REGISTRY_LOCK = threading.Lock()
 
 
 def generate_session_no() -> str:
+    """生成便于排序和检索的实时会话编号。"""
+
     return f"LIVE{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid4().hex[:6].upper()}"
 
 
 def _session_result_paths(session: LiveSession) -> tuple[str, str]:
+    """返回摘要 JSON 和原始对比视频的目标路径。
+
+    当前实时模式默认不导出对比视频，但保留返回值可以让底层算法接口保持一致。
+    """
+
     result_dir = Path(settings.MEDIA_ROOT) / "live_session" / "results" / session.session_no
     result_dir.mkdir(parents=True, exist_ok=True)
     return str(result_dir / "summary.json"), str(result_dir / "overlay_raw.mp4")
 
 
 def _update_session_summary(session: LiveSession, summary: dict, status: str) -> None:
+    """把算法输出的摘要结果回写到数据库。"""
+
     session.summary_json_path = str(summary.get("summary_json_path", session.summary_json_path))
     session.output_video_path = str(summary.get("output_video", session.output_video_path))
     session.avg_score = round(float(summary.get("avg_score_0_100", 0.0)), 2)
@@ -62,6 +70,11 @@ def _update_session_summary(session: LiveSession, summary: dict, status: str) ->
 
 
 def _update_preview_frame(session_id: int, frame) -> None:
+    """把最新预览帧压缩后写入内存注册表。
+
+    这里主动做降采样和限频，避免预览图回传反过来拖慢实时线程。
+    """
+
     with _REGISTRY_LOCK:
         entry = _SESSION_REGISTRY.get(session_id)
         if entry is None:
@@ -73,13 +86,13 @@ def _update_preview_frame(session_id: int, frame) -> None:
 
     preview_frame = frame
     height, width = preview_frame.shape[:2]
-    target_width = 720
+    target_width = 640
     if width > target_width:
         scale = target_width / float(width)
         target_height = max(1, int(round(height * scale)))
         preview_frame = cv2.resize(preview_frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
 
-    ok, encoded = cv2.imencode(".jpg", preview_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+    ok, encoded = cv2.imencode(".jpg", preview_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 55])
     if not ok:
         return
     with _REGISTRY_LOCK:
@@ -91,6 +104,8 @@ def _update_preview_frame(session_id: int, frame) -> None:
 
 
 def _update_runtime_state(session_id: int, state: dict) -> None:
+    """记录内存中的最新实时状态，供详情页轮询。"""
+
     with _REGISTRY_LOCK:
         entry = _SESSION_REGISTRY.get(session_id)
         if entry is None:
@@ -98,11 +113,13 @@ def _update_runtime_state(session_id: int, state: dict) -> None:
         entry["latest_state"] = dict(state)
 
 
-def _run_live_session_worker(session_id: int, stop_event: threading.Event, pause_event: threading.Event) -> None:
+def _run_live_session_worker(session_id: int, stop_event: threading.Event) -> None:
+    """后台线程：执行一次完整实时会话。"""
+
     close_old_connections()
     try:
         session = LiveSession.objects.select_related("template", "user").get(id=session_id)
-        summary_path, video_path = _session_result_paths(session)
+        summary_path, _ = _session_result_paths(session)
         error_frames_dir = str(Path(summary_path).with_name("error_frames")) if session.capture_error_frames else None
         session.status = LiveSession.Status.RUNNING
         session.started_at = datetime.now()
@@ -138,23 +155,16 @@ def _run_live_session_worker(session_id: int, stop_event: threading.Event, pause
             camera_height=session.camera_height,
             camera_mirror=session.camera_mirror,
             out_json=summary_path,
-            out_video=video_path if session.export_video else None,
+            out_video=None,
             out_error_frames_dir=error_frames_dir,
-            preview=session.preview,
-            max_frames=session.max_frames,
+            preview=False,
             stop_checker=stop_event.is_set,
-            pause_checker=pause_event.is_set,
+            pause_checker=None,
             frame_callback=lambda frame: _update_preview_frame(session_id, frame),
             state_callback=lambda state: _update_runtime_state(session_id, state),
         )
-        output_video = ""
-        raw_output_video = str(summary.get("output_video") or "")
-        if session.export_video and raw_output_video and Path(raw_output_video).exists():
-            web_video_path = str(Path(raw_output_video).with_name("overlay.mp4"))
-            transcode_to_browser_mp4(raw_output_video, web_video_path)
-            output_video = web_video_path if Path(web_video_path).exists() else raw_output_video
         summary["summary_json_path"] = summary_path
-        summary["output_video"] = output_video
+        summary["output_video"] = ""
         final_status = LiveSession.Status.STOPPED if stop_event.is_set() else LiveSession.Status.SUCCESS
         session.refresh_from_db()
         _update_session_summary(session, summary, final_status)
@@ -171,11 +181,12 @@ def _run_live_session_worker(session_id: int, stop_event: threading.Event, pause
 
 
 def start_live_session(session: LiveSession) -> LiveSession:
+    """注册并启动实时会话线程。"""
+
     stop_event = threading.Event()
-    pause_event = threading.Event()
     thread = threading.Thread(
         target=_run_live_session_worker,
-        args=(session.id, stop_event, pause_event),
+        args=(session.id, stop_event),
         name=f"live-session-{session.id}",
         daemon=True,
     )
@@ -183,7 +194,6 @@ def start_live_session(session: LiveSession) -> LiveSession:
         _SESSION_REGISTRY[session.id] = {
             "thread": thread,
             "stop_event": stop_event,
-            "pause_event": pause_event,
             "latest_frame": b"",
             "last_frame_at": 0.0,
             "latest_state": {},
@@ -193,6 +203,8 @@ def start_live_session(session: LiveSession) -> LiveSession:
 
 
 def stop_live_session(session: LiveSession) -> bool:
+    """请求后台线程尽快结束。"""
+
     with _REGISTRY_LOCK:
         entry = _SESSION_REGISTRY.get(session.id)
     if not entry:
@@ -203,49 +215,26 @@ def stop_live_session(session: LiveSession) -> bool:
     return True
 
 
-def pause_live_session(session: LiveSession) -> bool:
-    with _REGISTRY_LOCK:
-        entry = _SESSION_REGISTRY.get(session.id)
-    if not entry:
-        return False
-    pause_event = entry["pause_event"]
-    assert isinstance(pause_event, threading.Event)
-    pause_event.set()
-    LiveSession.objects.filter(id=session.id).update(status=LiveSession.Status.PAUSED, updated_at=datetime.now())
-    return True
-
-
-def resume_live_session(session: LiveSession) -> bool:
-    with _REGISTRY_LOCK:
-        entry = _SESSION_REGISTRY.get(session.id)
-    if not entry:
-        return False
-    pause_event = entry["pause_event"]
-    assert isinstance(pause_event, threading.Event)
-    pause_event.clear()
-    LiveSession.objects.filter(id=session.id).update(status=LiveSession.Status.RUNNING, updated_at=datetime.now())
-    return True
-
-
 def session_registry_status(session_id: int) -> dict[str, object]:
+    """返回线程注册表中的运行状态。"""
+
     with _REGISTRY_LOCK:
         entry = _SESSION_REGISTRY.get(session_id)
     if not entry:
-        return {"active": False, "stop_requested": False, "pause_requested": False}
+        return {"active": False, "stop_requested": False}
     thread = entry["thread"]
     stop_event = entry["stop_event"]
-    pause_event = entry["pause_event"]
     assert isinstance(thread, threading.Thread)
     assert isinstance(stop_event, threading.Event)
-    assert isinstance(pause_event, threading.Event)
     return {
         "active": thread.is_alive(),
         "stop_requested": stop_event.is_set(),
-        "pause_requested": pause_event.is_set(),
     }
 
 
 def repair_stale_live_session(session: LiveSession) -> LiveSession:
+    """修复线程退出但数据库状态未及时更新的会话。"""
+
     if session.status not in {LiveSession.Status.PENDING, LiveSession.Status.RUNNING, LiveSession.Status.PAUSED}:
         return session
 
@@ -272,6 +261,8 @@ def repair_stale_live_session(session: LiveSession) -> LiveSession:
 
 
 def get_live_session_preview_frame(session_id: int) -> bytes:
+    """读取内存中的最新预览图。"""
+
     with _REGISTRY_LOCK:
         entry = _SESSION_REGISTRY.get(session_id)
         if not entry:
@@ -281,6 +272,8 @@ def get_live_session_preview_frame(session_id: int) -> bytes:
 
 
 def get_live_session_runtime_payload(session_id: int) -> dict:
+    """读取内存中的最新实时状态。"""
+
     with _REGISTRY_LOCK:
         entry = _SESSION_REGISTRY.get(session_id)
         if not entry:
@@ -290,6 +283,8 @@ def get_live_session_runtime_payload(session_id: int) -> dict:
 
 
 def _safe_remove_path(path_str: str) -> None:
+    """仅允许删除 MEDIA_ROOT 下的结果文件，避免误删其他路径。"""
+
     if not path_str:
         return
     path = Path(path_str)
@@ -309,6 +304,8 @@ def _safe_remove_path(path_str: str) -> None:
 
 
 def delete_live_session(session: LiveSession) -> None:
+    """删除已结束会话及其文件结果。"""
+
     if session.status in {LiveSession.Status.PENDING, LiveSession.Status.RUNNING, LiveSession.Status.PAUSED}:
         raise ValueError("运行中的实时会话请先停止后再删除。")
 
