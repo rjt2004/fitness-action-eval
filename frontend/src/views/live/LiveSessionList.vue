@@ -66,7 +66,7 @@ onMounted(loadData);
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="avg_score" label="平均分" width="100" />
+        <el-table-column prop="avg_score" label="最终分数" width="110" />
         <el-table-column prop="hint_count" label="提示数" width="100" />
         <el-table-column prop="created_at" label="创建时间" min-width="180" />
         <el-table-column label="操作" min-width="180">

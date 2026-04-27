@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 
 import numpy as np
 
@@ -339,7 +339,75 @@ BADUANJIN_MANUAL_BOUNDARIES_S: List[tuple[float, float]] = [
 ]
 
 
-def _build_phase_ids_from_manual_timing(time_s: np.ndarray) -> np.ndarray:
+def default_baduanjin_rule_config() -> Dict[str, Any]:
+    """把内置八段锦规则导出成可持久化到模板的配置。"""
+
+    return {
+        "action_key": "baduanjin",
+        "phase_mode": "manual_time",
+        "standard_duration_s": float(BADUANJIN_STANDARD_DURATION_S),
+        "manual_boundaries_s": [
+            {"phase_id": idx, "start_s": float(start), "end_s": float(end)}
+            for idx, (start, end) in enumerate(BADUANJIN_MANUAL_BOUNDARIES_S)
+        ],
+        "phases": [
+            {
+                "phase_id": int(phase.phase_id),
+                "key": phase.key,
+                "name": phase.display_name,
+                "cue": phase.cue,
+                "duration_weight": float(phase.duration_weight),
+                "point_importance": dict(phase.point_importance),
+                "angle_importance": dict(phase.angle_importance),
+                "feedback_priority": list(phase.feedback_priority),
+                "hint_templates": dict(phase.hint_templates),
+                "feedback_threshold_scale": float(phase.feedback_threshold_scale),
+                "substages": [
+                    {
+                        "key": substage.key,
+                        "name": substage.name,
+                        "start_ratio": float(substage.start_ratio),
+                        "end_ratio": float(substage.end_ratio),
+                        "cue": substage.cue,
+                        "priority_parts": list(substage.priority_parts),
+                        "hint_templates": dict(substage.hint_templates),
+                    }
+                    for substage in BADUANJIN_SUBSTAGES.get(int(phase.phase_id), [])
+                ],
+            }
+            for phase in BADUANJIN_PHASES
+        ],
+    }
+
+
+def _rule_phase_map(rule_config: Mapping[str, Any] | None) -> Dict[int, Mapping[str, Any]]:
+    if not rule_config:
+        return {}
+    phases = rule_config.get("phases", [])
+    if not isinstance(phases, list):
+        return {}
+    return {int(item.get("phase_id", idx)): item for idx, item in enumerate(phases) if isinstance(item, Mapping)}
+
+
+def _phase_from_rule(phase_id: int, rule_config: Mapping[str, Any] | None) -> BaduanjinPhase | None:
+    phase_row = _rule_phase_map(rule_config).get(int(phase_id))
+    if not phase_row:
+        return None
+    return BaduanjinPhase(
+        phase_id=int(phase_row.get("phase_id", phase_id)),
+        key=str(phase_row.get("key", f"phase_{phase_id}")),
+        display_name=str(phase_row.get("name", phase_row.get("display_name", f"阶段{phase_id}"))),
+        cue=str(phase_row.get("cue", "")),
+        duration_weight=float(phase_row.get("duration_weight", 1.0)),
+        point_importance=dict(phase_row.get("point_importance", {})),
+        angle_importance=dict(phase_row.get("angle_importance", {})),
+        feedback_priority=tuple(phase_row.get("feedback_priority", FEEDBACK_PART_GROUPS.keys())),
+        hint_templates=dict(phase_row.get("hint_templates", {})),
+        feedback_threshold_scale=float(phase_row.get("feedback_threshold_scale", 1.0)),
+    )
+
+
+def _build_phase_ids_from_manual_timing(time_s: np.ndarray, rule_config: Mapping[str, Any] | None = None) -> np.ndarray:
     if time_s.ndim != 1 or time_s.size == 0:
         return np.zeros((0,), dtype=np.int32)
 
@@ -347,8 +415,14 @@ def _build_phase_ids_from_manual_timing(time_s: np.ndarray) -> np.ndarray:
     if sequence_duration <= 0:
         return np.zeros((time_s.shape[0],), dtype=np.int32)
 
-    scale = sequence_duration / float(BADUANJIN_STANDARD_DURATION_S)
-    scaled_starts = np.asarray([start for start, _ in BADUANJIN_MANUAL_BOUNDARIES_S], dtype=np.float32) * scale
+    standard_duration_s = float((rule_config or {}).get("standard_duration_s") or BADUANJIN_STANDARD_DURATION_S)
+    boundaries = (rule_config or {}).get("manual_boundaries_s")
+    if isinstance(boundaries, list) and boundaries:
+        starts = [float(item.get("start_s", 0.0)) for item in boundaries if isinstance(item, Mapping)]
+    else:
+        starts = [start for start, _ in BADUANJIN_MANUAL_BOUNDARIES_S]
+    scale = sequence_duration / max(1e-6, standard_duration_s)
+    scaled_starts = np.asarray(starts, dtype=np.float32) * scale
 
     phase_ids = np.zeros((time_s.shape[0],), dtype=np.int32)
     for phase_idx in range(1, len(scaled_starts)):
@@ -377,18 +451,48 @@ def _build_phase_ids_by_weight(length: int) -> np.ndarray:
     return phase_ids
 
 
-def build_phase_ids(length: int, time_s: np.ndarray | None = None) -> np.ndarray:
+def _build_phase_ids_by_rule_weight(length: int, rule_config: Mapping[str, Any]) -> np.ndarray:
+    phases = list(_rule_phase_map(rule_config).values())
+    if length <= 0 or not phases:
+        return np.zeros((0,), dtype=np.int32)
+    weights = np.asarray([float(item.get("duration_weight", 1.0)) for item in phases], dtype=np.float32)
+    if not np.isfinite(weights).all() or float(np.sum(weights)) <= 0:
+        weights = np.ones((len(phases),), dtype=np.float32)
+    weights = weights / float(np.sum(weights))
+    boundaries = np.cumsum(weights) * float(length)
+    boundaries = np.rint(boundaries).astype(np.int32)
+    boundaries[-1] = length
+
+    phase_ids = np.zeros((length,), dtype=np.int32)
+    start = 0
+    phase_keys = [int(item.get("phase_id", idx)) for idx, item in enumerate(phases)]
+    for phase_id, end in zip(phase_keys, boundaries):
+        end = int(np.clip(end, start + 1, length))
+        phase_ids[start:end] = int(phase_id)
+        start = end
+    if start < length:
+        phase_ids[start:] = int(phase_keys[-1])
+    return phase_ids
+
+
+def build_phase_ids(length: int, time_s: np.ndarray | None = None, rule_config: Mapping[str, Any] | None = None) -> np.ndarray:
     if length <= 0:
         return np.zeros((0,), dtype=np.int32)
     if time_s is not None and getattr(time_s, "shape", (0,))[0] == length:
-        phase_ids = _build_phase_ids_from_manual_timing(np.asarray(time_s, dtype=np.float32))
+        phase_ids = _build_phase_ids_from_manual_timing(np.asarray(time_s, dtype=np.float32), rule_config=rule_config)
         if phase_ids.shape[0] == length and np.any(phase_ids):
             return phase_ids
+    if rule_config and _rule_phase_map(rule_config):
+        return _build_phase_ids_by_rule_weight(length, rule_config)
     return _build_phase_ids_by_weight(length)
 
 
-def get_phase_definition(phase_id: int) -> BaduanjinPhase:
-    phase_id = int(np.clip(phase_id, 0, len(BADUANJIN_PHASES) - 1))
+def get_phase_definition(phase_id: int, rule_config: Mapping[str, Any] | None = None) -> BaduanjinPhase:
+    raw_phase_id = int(phase_id)
+    rule_phase = _phase_from_rule(raw_phase_id, rule_config)
+    if rule_phase is not None:
+        return rule_phase
+    phase_id = int(np.clip(raw_phase_id, 0, len(BADUANJIN_PHASES) - 1))
     return BADUANJIN_PHASES[phase_id]
 
 
@@ -680,7 +784,12 @@ def _build_state_machine_substage_keys(phase_ids: np.ndarray, time_s: np.ndarray
     return keys
 
 
-def build_substage_metadata(phase_ids: np.ndarray, time_s: np.ndarray, points: np.ndarray | None = None) -> Dict[str, object]:
+def build_substage_metadata(
+    phase_ids: np.ndarray,
+    time_s: np.ndarray,
+    points: np.ndarray | None = None,
+    rule_config: Mapping[str, Any] | None = None,
+) -> Dict[str, object]:
     keys: List[str] = []
     names: List[str] = []
     cues: List[str] = []
@@ -726,10 +835,10 @@ def build_substage_metadata(phase_ids: np.ndarray, time_s: np.ndarray, points: n
             rows.append(
                 {
                     "phase_id": phase_id,
-                    "phase_name": get_phase_definition(phase_id).display_name,
+                    "phase_name": get_phase_definition(phase_id, rule_config=rule_config).display_name,
                     "substage_key": current_key,
                     "substage_name": substage.name if substage is not None else current_key,
-                    "cue": substage.cue if substage is not None else get_phase_definition(phase_id).cue,
+                    "cue": substage.cue if substage is not None else get_phase_definition(phase_id, rule_config=rule_config).cue,
                     "start_seq_idx": int(start),
                     "end_seq_idx": int(idx - 1),
                     "start_time_s": start_time_s,
@@ -763,6 +872,14 @@ def compute_joint_angle_sequence(points: np.ndarray) -> np.ndarray:
 @lru_cache(maxsize=32)
 def _phase_weight_vector(phase_id: int, point_dims: int = 33 * 2, angle_dims: int = len(ANGLE_NAMES)) -> np.ndarray:
     phase = get_phase_definition(phase_id)
+    return _phase_weight_vector_from_phase(phase, point_dims=point_dims, angle_dims=angle_dims)
+
+
+def _phase_weight_vector_from_phase(
+    phase: BaduanjinPhase,
+    point_dims: int = 33 * 2,
+    angle_dims: int = len(ANGLE_NAMES),
+) -> np.ndarray:
     point_weights = np.ones((33, 2), dtype=np.float32)
     for group_name, weight in phase.point_importance.items():
         for idx in POINT_GROUPS.get(group_name, []):
@@ -778,24 +895,42 @@ def _phase_weight_vector(phase_id: int, point_dims: int = 33 * 2, angle_dims: in
     return np.concatenate([point_weights.reshape(point_dims), angle_weights], axis=0)
 
 
-def apply_phase_feature_weights(base_features: np.ndarray, phase_ids: np.ndarray) -> np.ndarray:
+def apply_phase_feature_weights(
+    base_features: np.ndarray,
+    phase_ids: np.ndarray,
+    rule_config: Mapping[str, Any] | None = None,
+) -> np.ndarray:
     if base_features.ndim != 2:
         raise ValueError("apply_phase_feature_weights expects (T, D) features.")
     if phase_ids.shape[0] != base_features.shape[0]:
         raise ValueError("phase_ids length must equal feature length.")
     weighted = np.empty_like(base_features, dtype=np.float32)
     for idx in range(base_features.shape[0]):
-        weighted[idx] = base_features[idx] * _phase_weight_vector(int(phase_ids[idx]), angle_dims=base_features.shape[1] - 66)
+        if rule_config:
+            phase = get_phase_definition(int(phase_ids[idx]), rule_config=rule_config)
+            weights = _phase_weight_vector_from_phase(phase, angle_dims=base_features.shape[1] - 66)
+        else:
+            weights = _phase_weight_vector(int(phase_ids[idx]), angle_dims=base_features.shape[1] - 66)
+        weighted[idx] = base_features[idx] * weights
     return weighted
 
 
-def weight_single_feature(feature: np.ndarray, phase_id: int) -> np.ndarray:
+def weight_single_feature(feature: np.ndarray, phase_id: int, rule_config: Mapping[str, Any] | None = None) -> np.ndarray:
     if feature.ndim != 1:
         raise ValueError("weight_single_feature expects a 1D feature vector.")
-    return feature * _phase_weight_vector(int(phase_id), angle_dims=feature.shape[0] - 66)
+    if rule_config:
+        phase = get_phase_definition(int(phase_id), rule_config=rule_config)
+        weights = _phase_weight_vector_from_phase(phase, angle_dims=feature.shape[0] - 66)
+    else:
+        weights = _phase_weight_vector(int(phase_id), angle_dims=feature.shape[0] - 66)
+    return feature * weights
 
 
-def phase_metadata_rows(phase_ids: np.ndarray, time_s: np.ndarray) -> List[Dict[str, float | int | str]]:
+def phase_metadata_rows(
+    phase_ids: np.ndarray,
+    time_s: np.ndarray,
+    rule_config: Mapping[str, Any] | None = None,
+) -> List[Dict[str, float | int | str]]:
     rows: List[Dict[str, float | int | str]] = []
     if phase_ids.size == 0:
         return rows
@@ -803,7 +938,7 @@ def phase_metadata_rows(phase_ids: np.ndarray, time_s: np.ndarray) -> List[Dict[
     current = int(phase_ids[0])
     for idx in range(1, len(phase_ids) + 1):
         if idx == len(phase_ids) or int(phase_ids[idx]) != current:
-            phase = get_phase_definition(current)
+            phase = get_phase_definition(current, rule_config=rule_config)
             rows.append(
                 {
                     "phase_id": phase.phase_id,
@@ -835,9 +970,16 @@ def _direction_phrase(part: str, dx: float, dy: float) -> str:
     return "向标准动作再靠近一些"
 
 
-def build_baduanjin_hint_text(phase_id: int | None, part: str, dx: float, dy: float, substage_key: str | None = None) -> str:
+def build_baduanjin_hint_text(
+    phase_id: int | None,
+    part: str,
+    dx: float,
+    dy: float,
+    substage_key: str | None = None,
+    rule_config: Mapping[str, Any] | None = None,
+) -> str:
     if phase_id is not None:
-        phase = get_phase_definition(phase_id)
+        phase = get_phase_definition(phase_id, rule_config=rule_config)
         substage = get_substage_by_key(phase.phase_id, substage_key)
         if substage is not None:
             if part in substage.hint_templates:

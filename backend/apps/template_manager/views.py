@@ -9,6 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 from apps.accounts.models import User
 from apps.accounts.permissions import IsAdminRole
 from config.api_response import api_error, api_success
+from fitness_action_eval.baduanjin import default_baduanjin_rule_config
 
 from .models import ActionCategory, TemplateVideo
 from .serializers import (
@@ -74,6 +75,7 @@ def template_upload_view(request):
             frame_stride=validated.get("frame_stride", 4),
             smooth_window=validated.get("smooth_window", 7),
             pose_model=validated.get("pose_model", "heavy"),
+            rule_config=validated.get("rule_config") or default_baduanjin_rule_config(),
             created_by=request.user,
         )
         register_source_asset(template)

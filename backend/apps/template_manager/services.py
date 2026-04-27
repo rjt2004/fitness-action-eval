@@ -82,6 +82,7 @@ def build_template_file(template: TemplateVideo, progress_callback=None) -> Temp
             smooth_window=template.smooth_window,
             template_path=str(output_path),
             frame_stride=template.frame_stride,
+            rule_config=template.rule_config,
             preview=False,
             progress_callback=progress_callback,
         )

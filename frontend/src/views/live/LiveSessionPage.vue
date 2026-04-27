@@ -2,7 +2,13 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { onBeforeRouteLeave } from "vue-router";
 import { ElMessage } from "element-plus";
-import { getLiveSessionDetail, getLiveSessionPreviewFrame, startLiveSession, stopLiveSession } from "@/api/liveSession";
+import {
+  getLiveSessions,
+  getLiveSessionDetail,
+  getLiveSessionPreviewFrame,
+  startLiveSession,
+  stopLiveSession,
+} from "@/api/liveSession";
 import { getPoseModelOptions } from "@/api/system";
 import { getTemplateDetail, getTemplateList } from "@/api/template";
 
@@ -17,20 +23,20 @@ const previewFrameUrl = ref("");
 let timer = null;
 let previewCounter = 0;
 let leaveStopping = false;
+let polling = false;
 
-// 这一组参数优先保证实时性，适合真实摄像头或视频模拟摄像头跟练。
 const REALTIME_DEFAULTS = {
-  camera_width: 480,
-  camera_height: 270,
-  camera_mirror: true,
+  camera_width: 320,
+  camera_height: 180,
+  camera_mirror: false,
   capture_error_frames: false,
-  frame_stride: 1,
+  frame_stride: 2,
   smooth_window: 1,
   pose_model: "lite",
   hint_threshold: 0.2,
   hint_min_interval: 60,
-  max_hints: 360,
-  ref_search_window: 60,
+  max_hints: 240,
+  ref_search_window: 24,
 };
 
 const form = reactive({
@@ -42,17 +48,28 @@ const form = reactive({
 
 const runtimeModelOptions = [{ value: "follow_template", label: "跟随模板模型" }];
 const sessionActive = computed(() => ["pending", "running"].includes(currentSession.value?.status || ""));
+
 const realtimeInfo = computed(() => {
   const runtime = currentSession.value?.runtime_payload || {};
   const summary = currentSession.value?.summary_payload || {};
   const latestHint = Array.isArray(summary.hints) && summary.hints.length ? summary.hints[summary.hints.length - 1] : {};
+  const finalScore = summary.score_0_100 ?? currentSession.value?.avg_score ?? "";
   return {
     phase_name: runtime.phase_name || summary.final_phase_name || currentSession.value?.final_phase_name || "",
     part: runtime.part || latestHint.part || currentSession.value?.final_part || "",
     message: runtime.message || latestHint.message || "",
-    score: runtime.score ?? currentSession.value?.avg_score ?? "",
+    final_score: ["success", "failed", "stopped"].includes(currentSession.value?.status || "") ? finalScore : "",
     local_error: runtime.local_error ?? "",
   };
+});
+
+const realtimePerf = computed(() => {
+  const runtimePerf = currentSession.value?.runtime_payload?.perf;
+  if (runtimePerf && typeof runtimePerf === "object") return runtimePerf;
+  const summaryPerf = currentSession.value?.summary_payload?.perf;
+  if (summaryPerf && typeof summaryPerf === "object") return summaryPerf;
+  const runtimeStatePerf = currentSession.value?.summary_payload?.runtime_state?.perf;
+  return runtimeStatePerf && typeof runtimeStatePerf === "object" ? runtimeStatePerf : {};
 });
 
 const realtimeMessage = computed(() => {
@@ -115,6 +132,18 @@ async function loadTemplates() {
   }
 }
 
+async function loadLatestSession() {
+  const sessions = await getLiveSessions();
+  if (!Array.isArray(sessions) || !sessions.length) return;
+  const latest = [...sessions].sort((a, b) => {
+    const aTime = new Date(a.created_at || 0).getTime();
+    const bTime = new Date(b.created_at || 0).getTime();
+    return bTime - aTime;
+  })[0];
+  if (!latest?.id) return;
+  currentSession.value = await getLiveSessionDetail(latest.id);
+}
+
 async function loadPoseModelOptions() {
   poseModelOptions.value = await getPoseModelOptions();
 }
@@ -134,9 +163,10 @@ async function loadTemplateDetail(templateId) {
 
 function stopPolling() {
   if (timer) {
-    window.clearInterval(timer);
+    window.clearTimeout(timer);
     timer = null;
   }
+  polling = false;
 }
 
 async function refreshPreviewFrame(sessionId) {
@@ -152,22 +182,37 @@ async function refreshPreviewFrame(sessionId) {
   }
 }
 
-function startPolling(sessionId) {
-  stopPolling();
-  previewCounter = 0;
-  timer = window.setInterval(async () => {
+async function pollSession(sessionId) {
+  if (polling) return;
+  polling = true;
+  try {
     previewCounter += 1;
     await refreshPreviewFrame(sessionId);
-    // 详情轮询频率低于预览轮询，避免给后端线程增加过多压力。
-    if (previewCounter % 4 === 0) {
+    if (previewCounter % 3 === 0) {
       const data = await getLiveSessionDetail(sessionId);
       currentSession.value = data;
       if (["success", "failed", "stopped"].includes(data.status)) {
         pauseReferenceVideo();
         stopPolling();
+        return;
       }
     }
-  }, 250);
+  } finally {
+    polling = false;
+    if (timer !== null && currentSession.value?.id === sessionId && sessionActive.value) {
+      timer = window.setTimeout(() => {
+        pollSession(sessionId);
+      }, 400);
+    }
+  }
+}
+
+function startPolling(sessionId) {
+  stopPolling();
+  previewCounter = 0;
+  timer = window.setTimeout(() => {
+    pollSession(sessionId);
+  }, 0);
 }
 
 async function handleStart() {
@@ -237,6 +282,7 @@ watch(
 onMounted(() => {
   loadPoseModelOptions();
   loadTemplates();
+  loadLatestSession();
   window.addEventListener("pagehide", handlePageHide);
 });
 
@@ -303,7 +349,7 @@ onBeforeUnmount(() => {
                 <el-input-number v-model="form.camera_width" :min="320" :max="1920" />
               </el-form-item>
               <el-form-item label="分辨率高度">
-                <el-input-number v-model="form.camera_height" :min="240" :max="1080" />
+                <el-input-number v-model="form.camera_height" :min="180" :max="1080" />
               </el-form-item>
               <el-form-item label="镜像显示">
                 <el-switch v-model="form.camera_mirror" />
@@ -363,12 +409,30 @@ onBeforeUnmount(() => {
               <strong>{{ realtimeInfo.part || "--" }}</strong>
             </div>
             <div class="live-coach-field">
-              <span>当前分数</span>
-              <strong>{{ realtimeInfo.score !== "" ? Number(realtimeInfo.score).toFixed(1) : "--" }}</strong>
+              <span>最终分数</span>
+              <strong>{{ realtimeInfo.final_score !== "" ? Number(realtimeInfo.final_score).toFixed(1) : "--" }}</strong>
             </div>
             <div class="live-coach-field">
               <span>局部偏差</span>
               <strong>{{ realtimeInfo.local_error !== "" ? Number(realtimeInfo.local_error).toFixed(3) : "--" }}</strong>
+            </div>
+          </div>
+          <div class="live-metrics-grid">
+            <div class="live-metric-chip">
+              <span>处理帧率</span>
+              <strong>{{ realtimePerf.processed_fps !== undefined ? Number(realtimePerf.processed_fps).toFixed(1) : "--" }} fps</strong>
+            </div>
+            <div class="live-metric-chip">
+              <span>预览帧率</span>
+              <strong>{{ realtimePerf.preview_fps !== undefined ? Number(realtimePerf.preview_fps).toFixed(1) : "--" }} fps</strong>
+            </div>
+            <div class="live-metric-chip">
+              <span>状态刷新率</span>
+              <strong>{{ realtimePerf.state_fps !== undefined ? Number(realtimePerf.state_fps).toFixed(1) : "--" }} fps</strong>
+            </div>
+            <div class="live-metric-chip">
+              <span>时间线滞后</span>
+              <strong>{{ realtimePerf.timeline_lag_ms !== undefined ? Number(realtimePerf.timeline_lag_ms).toFixed(0) : "--" }} ms</strong>
             </div>
           </div>
         </div>
@@ -441,6 +505,13 @@ onBeforeUnmount(() => {
   margin-top: 18px;
 }
 
+.live-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
 .live-coach-field {
   min-height: 86px;
   padding: 14px 16px;
@@ -465,10 +536,34 @@ onBeforeUnmount(() => {
   line-height: 1.45;
 }
 
+.live-metric-chip {
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(240, 249, 255, 0.78);
+  box-shadow: inset 0 0 0 1px rgba(14, 116, 144, 0.08);
+}
+
+.live-metric-chip span {
+  display: block;
+  color: #0f766e;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.live-metric-chip strong {
+  display: block;
+  margin-top: 6px;
+  color: #0f172a;
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
 @media (max-width: 1200px) {
   .content-grid,
   .grid-two,
-  .live-coach-grid {
+  .live-coach-grid,
+  .live-metrics-grid {
     grid-template-columns: 1fr;
   }
 

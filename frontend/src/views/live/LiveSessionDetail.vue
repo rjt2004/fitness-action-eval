@@ -17,6 +17,7 @@ function toMediaUrl(path) {
 
 const hintItems = computed(() => detail.value?.summary_payload?.hints || []);
 const errorFrameItems = computed(() => detail.value?.summary_payload?.error_frames || []);
+const finalScore = computed(() => detail.value?.summary_payload?.score_0_100 ?? detail.value?.avg_score ?? "");
 
 async function loadData() {
   loading.value = true;
@@ -86,8 +87,12 @@ onMounted(loadData);
               <div class="task-info-item__value">{{ detail?.template?.template_name || "--" }}</div>
             </div>
             <div class="task-info-item">
-              <div class="task-info-item__label">平均分</div>
-              <div class="task-info-item__value">{{ detail?.avg_score ?? "--" }}</div>
+              <div class="task-info-item__label">最终分数</div>
+              <div class="task-info-item__value">{{ finalScore !== "" ? Number(finalScore).toFixed(2) : "--" }}</div>
+            </div>
+            <div class="task-info-item">
+              <div class="task-info-item__label">归一化距离</div>
+              <div class="task-info-item__value">{{ detail?.summary_payload?.normalized_dtw_distance ?? "--" }}</div>
             </div>
             <div class="task-info-item">
               <div class="task-info-item__label">抽帧步长</div>

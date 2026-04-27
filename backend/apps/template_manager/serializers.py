@@ -49,6 +49,7 @@ class TemplateVideoListSerializer(serializers.ModelSerializer):
             "smooth_window",
             "pose_model",
             "pose_model_label",
+            "rule_config",
             "template_file_path",
             "cover_image_path",
             "build_error",
@@ -83,6 +84,22 @@ class TemplateVideoDetailSerializer(TemplateVideoListSerializer):
         return FileAssetSerializer(assets, many=True).data
 
     def get_phase_guides(self, obj: TemplateVideo):
+        phases = obj.rule_config.get("phases") if isinstance(obj.rule_config, dict) else None
+        if phases:
+            return [
+                {
+                    "phase_id": int(phase.get("phase_id", index)),
+                    "key": str(phase.get("key", "")),
+                    "phase_name": str(phase.get("name", phase.get("display_name", ""))),
+                    "cue": str(phase.get("cue", "")),
+                    "feedback_priority": phase.get("feedback_priority", []),
+                    "hint_templates": phase.get("hint_templates", {}),
+                    "point_importance": phase.get("point_importance", {}),
+                    "angle_importance": phase.get("angle_importance", {}),
+                }
+                for index, phase in enumerate(phases)
+                if isinstance(phase, dict)
+            ]
         return [
             {
                 "phase_id": phase.phase_id,
@@ -104,6 +121,7 @@ class TemplateUploadSerializer(serializers.Serializer):
     frame_stride = serializers.IntegerField(required=False, default=4, min_value=1)
     smooth_window = serializers.IntegerField(required=False, default=7, min_value=1)
     pose_model = serializers.ChoiceField(choices=tuple(POSE_MODEL_OPTIONS.keys()), required=False, default=DEFAULT_TEMPLATE_MODEL_KEY)
+    rule_config = serializers.JSONField(required=False)
 
     def validate_category_id(self, value):
         if not ActionCategory.objects.filter(id=value, is_active=True).exists():

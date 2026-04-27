@@ -19,6 +19,7 @@ from fitness_action_eval.baduanjin import (
     apply_phase_feature_weights,
     build_phase_ids,
     build_substage_metadata,
+    default_baduanjin_rule_config,
     get_phase_definition,
     get_substage_definition,
     get_substage_by_key,
@@ -61,6 +62,8 @@ def ensure_parent_dir(path: str) -> None:
 def _ensure_baduanjin_features(data: Dict[str, Any]) -> Dict[str, Any]:
     """补齐八段锦专项需要的阶段与子阶段特征。"""
 
+    rule_config = data.get("rule_config") or default_baduanjin_rule_config()
+    data["rule_config"] = rule_config
     if "angle_features" not in data or "combined_features_raw" not in data or "feature_mean" not in data or "feature_std" not in data:
         feature_bundle = build_pose_feature_bundle(data["points"])
         data["angle_features"] = feature_bundle["angle_features"]
@@ -74,23 +77,42 @@ def _ensure_baduanjin_features(data: Dict[str, Any]) -> Dict[str, Any]:
     data["phase_ids"] = build_phase_ids(
         int(data["points"].shape[0]),
         time_s=data.get("time_s"),
+        rule_config=rule_config,
     ).astype(np.int32)
 
-    data["phase_rows"] = phase_metadata_rows(data["phase_ids"], data["time_s"])
+    data["phase_rows"] = phase_metadata_rows(data["phase_ids"], data["time_s"], rule_config=rule_config)
     state_points = data.get("raw_points", data["points"])
-    substage_metadata = build_substage_metadata(data["phase_ids"], data["time_s"], points=state_points)
+    substage_metadata = build_substage_metadata(data["phase_ids"], data["time_s"], points=state_points, rule_config=rule_config)
     data["substage_keys"] = substage_metadata["keys"]
     data["substage_names"] = substage_metadata["names"]
     data["substage_cues"] = substage_metadata["cues"]
     data["substage_rows"] = substage_metadata["rows"]
-    data["features"] = apply_phase_feature_weights(data["base_features"], data["phase_ids"])
+    data["features"] = apply_phase_feature_weights(data["base_features"], data["phase_ids"], rule_config=rule_config)
     return data
+
+
+def _apply_template_feature_stats(qry_data: Dict[str, Any], ref_data: Dict[str, Any]) -> Dict[str, Any]:
+    """把待测序列投影到模板特征标准化空间。"""
+
+    if qry_data.get("combined_features_raw") is None:
+        feature_bundle = build_pose_feature_bundle(qry_data["points"])
+        qry_data["angle_features"] = feature_bundle["angle_features"]
+        qry_data["combined_features_raw"] = feature_bundle["combined_features_raw"]
+    feature_mean = ref_data["feature_mean"]
+    feature_std = np.maximum(ref_data["feature_std"], 1e-6)
+    qry_data["feature_mean"] = feature_mean
+    qry_data["feature_std"] = feature_std
+    qry_data["base_features"] = ((qry_data["combined_features_raw"] - feature_mean) / feature_std).astype(np.float32)
+    qry_data["features"] = qry_data["base_features"]
+    qry_data["rule_config"] = ref_data.get("rule_config") or default_baduanjin_rule_config()
+    return qry_data
 
 
 def _template_payload(ref_video: str, task_model: str, num_poses: int, smooth_window: int, ref_data: Dict[str, Any]) -> Dict[str, np.ndarray]:
     return {
         "reference_video": np.asarray(ref_video),
         "task_model": np.asarray(task_model),
+        "rule_config_json": np.asarray(json.dumps(ref_data.get("rule_config") or default_baduanjin_rule_config(), ensure_ascii=False)),
         "num_poses": np.asarray(int(num_poses), dtype=np.int32),
         "smooth_window": np.asarray(int(smooth_window), dtype=np.int32),
         "frame_stride": np.asarray(int(ref_data.get("frame_stride", 1)), dtype=np.int32),
@@ -138,6 +160,7 @@ def save_pose_template(
     smooth_window: int,
     template_path: str,
     frame_stride: int = 1,
+    rule_config: Optional[Dict[str, Any]] = None,
     preview: bool = False,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, Any]:
@@ -160,6 +183,7 @@ def save_pose_template(
     )
     if progress_callback:
         progress_callback(92, "正在生成阶段特征")
+    ref_data["rule_config"] = rule_config or default_baduanjin_rule_config()
     ref_data = _ensure_baduanjin_features(ref_data)
     if progress_callback:
         progress_callback(96, "正在保存模板文件")
@@ -191,9 +215,16 @@ def load_pose_template(template_path: str) -> Dict[str, Any]:
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"Template not found: {template_path}")
     with np.load(template_path, allow_pickle=False) as data:
+        rule_config = default_baduanjin_rule_config()
+        if "rule_config_json" in data:
+            try:
+                rule_config = json.loads(str(data["rule_config_json"].item()))
+            except (TypeError, json.JSONDecodeError):
+                rule_config = default_baduanjin_rule_config()
         loaded = {
             "reference_video": str(data["reference_video"].item()),
             "task_model": str(data["task_model"].item()),
+            "rule_config": rule_config,
             "num_poses": int(data["num_poses"].item()),
             "smooth_window": int(data["smooth_window"].item()),
             "frame_stride": int(data["frame_stride"].item()) if "frame_stride" in data else 1,
@@ -223,7 +254,7 @@ def _phase_maps_for_query(
     frame_phase_map: Dict[int, str] = {}
     frame_cue_map: Dict[int, str] = {}
     for query_frame, info in alignment_map.items():
-        phase = get_phase_definition(int(ref_data["phase_ids"][info["ref_seq_idx"]]))
+        phase = get_phase_definition(int(ref_data["phase_ids"][info["ref_seq_idx"]]), rule_config=ref_data.get("rule_config"))
         frame_phase_map[int(query_frame)] = phase.display_name
         frame_cue_map[int(query_frame)] = phase.cue
     return frame_phase_map, frame_cue_map
@@ -265,6 +296,7 @@ def finalize_scoring_outputs(
         ref_substage_cues=ref_data.get("substage_cues"),
         ref_angles=ref_data["angle_features"],
         qry_angles=qry_data["angle_features"],
+        rule_config=ref_data.get("rule_config"),
     )
 
     for hint in hints:
@@ -290,6 +322,7 @@ def finalize_scoring_outputs(
         "reference_video": ref_video,
         "query_video": query_video,
         "feature": "pose33_xy_normalized_plus_joint_angles_phase_weighted",
+        "rule_config": ref_data.get("rule_config") or default_baduanjin_rule_config(),
         "reference_length": int(ref_data["features"].shape[0]),
         "query_length": int(qry_data["features"].shape[0]),
         "reference_frame_stride": int(ref_data.get("frame_stride", 1)),
@@ -421,6 +454,7 @@ def run_dtw_scoring(
         preview_title="Query Pose Preview",
     )
     ref_data = _ensure_baduanjin_features(ref_data)
+    qry_data = _apply_template_feature_stats(qry_data, ref_data)
     qry_data = _ensure_baduanjin_features(qry_data)
     if progress_callback:
         progress_callback(42, "正在执行 DTW 对齐")
@@ -477,6 +511,7 @@ def run_dtw_scoring_from_template(
         preview=preview,
         preview_title="Query Pose Preview",
     )
+    qry_data = _apply_template_feature_stats(qry_data, ref_data)
     qry_data = _ensure_baduanjin_features(qry_data)
     if progress_callback:
         progress_callback(42, "正在执行 DTW 对齐")
@@ -563,6 +598,83 @@ def _is_video_file_source(source: Union[int, str]) -> bool:
     return Path(text).suffix.lower() in {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".m4v", ".webm"}
 
 
+def _score_live_pose_sequence(
+    ref_data: Dict[str, Any],
+    points_seq: list[np.ndarray],
+    raw_points_seq: list[np.ndarray],
+    frame_indices: list[int],
+    time_s: list[float],
+    fps: float,
+    score_scale: float,
+    hint_threshold: float,
+    hint_min_interval: int,
+    max_hints: int,
+) -> Dict[str, Any]:
+    """实时会话结束后，对整段采集姿态执行与离线一致的全局 DTW 评分。"""
+
+    if len(points_seq) < 10:
+        return {
+            "matched_frames": int(len(points_seq)),
+            "avg_score_0_100": 0.0,
+            "score_0_100": 0.0,
+            "normalized_dtw_distance": 0.0,
+            "dtw_distance": 0.0,
+            "alignment_path_length": 0,
+            "hint_count": 0,
+            "hints": [],
+        }
+
+    qry_data: Dict[str, Any] = {
+        "points": np.asarray(points_seq, dtype=np.float32),
+        "raw_points": np.asarray(raw_points_seq, dtype=np.float32),
+        "frame_indices": np.asarray(frame_indices, dtype=np.int32),
+        "time_s": np.asarray(time_s, dtype=np.float32),
+        "fps": float(fps),
+        "frame_stride": 1,
+    }
+    feature_bundle = build_pose_feature_bundle(qry_data["points"])
+    qry_data["angle_features"] = feature_bundle["angle_features"]
+    qry_data["combined_features_raw"] = feature_bundle["combined_features_raw"]
+    qry_data = _apply_template_feature_stats(qry_data, ref_data)
+    qry_data = _ensure_baduanjin_features(qry_data)
+
+    dist, path = dtw_distance_multidim(ref_data["features"], qry_data["features"])
+    norm_dist = dist / max(1, len(path))
+    score = distance_to_score(norm_dist, score_scale)
+    hints, _ = build_feedback(
+        path=path,
+        ref_points=ref_data["points"],
+        qry_points=qry_data["points"],
+        hint_threshold=hint_threshold,
+        hint_min_interval=hint_min_interval,
+        max_hints=max_hints,
+        ref_phase_ids=ref_data["phase_ids"],
+        qry_phase_ids=qry_data["phase_ids"],
+        ref_substage_keys=ref_data.get("substage_keys"),
+        ref_substage_names=ref_data.get("substage_names"),
+        ref_substage_cues=ref_data.get("substage_cues"),
+        ref_angles=ref_data["angle_features"],
+        qry_angles=qry_data["angle_features"],
+        rule_config=ref_data.get("rule_config"),
+    )
+    for hint in hints:
+        q_idx = int(hint["query_index"])
+        hint["query_frame"] = int(qry_data["frame_indices"][q_idx])
+        hint["query_time_s"] = float(qry_data["time_s"][q_idx])
+        hint["ref_time_s"] = float(ref_data["time_s"][int(hint["ref_index"])])
+
+    return {
+        "matched_frames": int(qry_data["features"].shape[0]),
+        "avg_score_0_100": float(score),
+        "score_0_100": float(score),
+        "normalized_dtw_distance": float(norm_dist),
+        "dtw_distance": float(dist),
+        "alignment_path_length": int(len(path)),
+        "hint_count": int(len(hints)),
+        "hints": hints,
+    }
+
+
 def run_camera_coach(
     template_path: Optional[str],
     ref_video: Optional[str],
@@ -586,7 +698,6 @@ def run_camera_coach(
     preview: bool = True,
     max_frames: Optional[int] = None,
     stop_checker: Optional[Callable[[], bool]] = None,
-    pause_checker: Optional[Callable[[], bool]] = None,
     frame_callback: Optional[Callable[[np.ndarray], None]] = None,
     state_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
@@ -647,9 +758,12 @@ def run_camera_coach(
     active_hint = ""
     active_hint_left = 0
     keep_frames = max(1, int(round(fps * 0.8)))
-    running_scores: list[float] = []
     live_hints: list[dict[str, Any]] = []
     error_frames: list[dict[str, Any]] = []
+    query_points_seq: list[np.ndarray] = []
+    query_raw_points_seq: list[np.ndarray] = []
+    query_frame_indices: list[int] = []
+    query_time_s: list[float] = []
     saved_error_keys: set[str] = set()
     processed_idx = 0
     last_hint_processed_idx = -10**9
@@ -665,6 +779,14 @@ def run_camera_coach(
     session_start_time = time.perf_counter()
     use_video_timeline = _is_video_file_source(camera_source)
     use_async_live_stream = True
+    preview_update_stride = 2
+    preview_min_interval_s = 0.18
+    state_update_interval_s = 0.25
+    last_preview_push_at = -1.0
+    last_state_push_at = -1.0
+    preview_sent_count = 0
+    state_sent_count = 0
+    skipped_capture_frames = 0
 
     detector_context = (
         LiveStreamPoseDetector(task_model=live_task_model, num_poses=ref_data["num_poses"])
@@ -673,12 +795,6 @@ def run_camera_coach(
     )
     with detector_context as landmarker:
         while True:
-            if stop_checker is not None and stop_checker():
-                break
-            while pause_checker is not None and pause_checker():
-                if stop_checker is not None and stop_checker():
-                    break
-                time.sleep(0.05)
             if stop_checker is not None and stop_checker():
                 break
             if max_frames is not None and frame_idx >= max_frames:
@@ -693,6 +809,7 @@ def run_camera_coach(
                 while frame_idx + capture_stride < target_capture_frame:
                     if not cap.grab():
                         break
+                    skipped_capture_frames += 1
                     frame_idx += 1
             ok, frame = cap.read()
             if not ok:
@@ -714,6 +831,7 @@ def run_camera_coach(
                 frame = cv2.flip(frame, 1)
 
             query_view = frame.copy()
+            query_overlay_view: Optional[np.ndarray] = None
             current_frame_idx = int(frame_idx)
             current_time_s = float(frame_idx / fps)
             if use_async_live_stream:
@@ -745,7 +863,6 @@ def run_camera_coach(
 
             if raw_pts is not None and norm_pts is not None:
                 accepted_hint: Optional[dict[str, Any]] = None
-                draw_pose_skeleton(query_view, raw_pts)
                 pose_window.append(norm_pts)
                 current_points, _, current_feature, current_angles = build_current_feature(
                     recent_points=pose_window,
@@ -753,6 +870,10 @@ def run_camera_coach(
                     feature_mean=ref_data["feature_mean"],
                     feature_std=ref_data["feature_std"],
                 )
+                query_points_seq.append(current_points.copy())
+                query_raw_points_seq.append(raw_pts.copy())
+                query_frame_indices.append(int(current_frame_idx))
+                query_time_s.append(float(current_time_s))
 
                 elapsed_s = current_time_s if use_video_timeline else time.perf_counter() - session_start_time
                 if ref_times.size:
@@ -769,7 +890,11 @@ def run_camera_coach(
                 best_ref_idx = target_ref_seq_idx
                 best_dist = float("inf")
                 for ref_idx in range(search_start, search_end):
-                    weighted_feature = weight_single_feature(current_feature, int(ref_data["phase_ids"][ref_idx]))
+                    weighted_feature = weight_single_feature(
+                        current_feature,
+                        int(ref_data["phase_ids"][ref_idx]),
+                        rule_config=ref_data.get("rule_config"),
+                    )
                     dist = float(np.linalg.norm(weighted_feature - ref_data["features"][ref_idx]))
                     if dist < best_dist:
                         best_dist = dist
@@ -777,7 +902,7 @@ def run_camera_coach(
 
                 current_ref_seq_idx = best_ref_idx
                 target_phase_id = int(ref_data["phase_ids"][current_ref_seq_idx])
-                phase = get_phase_definition(target_phase_id)
+                phase = get_phase_definition(target_phase_id, rule_config=ref_data.get("rule_config"))
                 if ref_data.get("substage_keys") is not None and len(ref_data["substage_keys"]) > current_ref_seq_idx:
                     substage_key = str(ref_data["substage_keys"][current_ref_seq_idx])
                     substage = get_substage_by_key(target_phase_id, substage_key)
@@ -797,8 +922,6 @@ def run_camera_coach(
                 latest_substage_key = substage.key
                 latest_substage_name = substage.name
                 latest_substage_cue = substage.cue
-                instant_score = distance_to_score(best_dist, score_scale)
-                running_scores.append(instant_score)
                 latest_local_err = float(
                     np.mean(np.linalg.norm(current_points - ref_data["points"][current_ref_seq_idx], axis=1))
                 )
@@ -810,6 +933,7 @@ def run_camera_coach(
                     substage_key=latest_substage_key,
                     ref_angles=ref_data["angle_features"][current_ref_seq_idx],
                     qry_angles=current_angles,
+                    rule_config=ref_data.get("rule_config"),
                 )
                 active_hint_left = keep_frames if active_hint else max(0, active_hint_left - 1)
                 if (
@@ -827,7 +951,6 @@ def run_camera_coach(
                         "substage_cue": latest_substage_cue,
                         "part": latest_part,
                         "message": active_hint,
-                        "score": float(instant_score),
                         "local_error": float(latest_local_err),
                         "ref_frame": int(ref_data["frame_indices"][current_ref_seq_idx]),
                         "ref_time_s": float(ref_data["time_s"][current_ref_seq_idx]) if ref_times.size else 0.0,
@@ -869,9 +992,13 @@ def run_camera_coach(
                 error_index = len(error_frames) + 1
                 image_name = f"error_{error_index:03d}.jpg"
                 image_path = str(Path(out_error_frames_dir) / image_name)
+                if query_overlay_view is None:
+                    query_overlay_view = query_view.copy()
+                    if raw_pts is not None:
+                        draw_pose_skeleton(query_overlay_view, raw_pts)
                 error_frame = compose_error_frame(
                     ref_frame=ref_view,
-                    qry_frame=query_view,
+                    qry_frame=query_overlay_view,
                     phase_name=latest_phase_name,
                     part=latest_part,
                     local_error=latest_local_err,
@@ -894,15 +1021,23 @@ def run_camera_coach(
                             "part": latest_part,
                             "message": active_hint,
                             "local_error": float(latest_local_err),
-                            "score": float(accepted_hint["score"]),
                         }
                     )
 
-            current_score = float(np.mean(running_scores[-60:])) if running_scores else 0.0
             hint_text = active_hint if active_hint_left > 0 else ""
             if active_hint_left > 0:
                 active_hint_left -= 1
-            if state_callback is not None:
+            completed_frames = processed_idx + 1
+            wall_elapsed_s = max(time.perf_counter() - session_start_time, 1e-6)
+            timeline_lag_ms = max(0.0, (wall_elapsed_s - float(current_time_s)) * 1000.0) if use_video_timeline else 0.0
+            should_push_state = state_callback is not None and (
+                accepted_hint is not None
+                or state_sent_count == 0
+                or (wall_elapsed_s - last_state_push_at) >= state_update_interval_s
+            )
+            if should_push_state and state_callback is not None:
+                state_sent_count += 1
+                last_state_push_at = wall_elapsed_s
                 state_callback(
                     {
                         "query_frame": int(current_frame_idx),
@@ -916,28 +1051,52 @@ def run_camera_coach(
                         "substage_cue": latest_substage_cue,
                         "part": latest_part,
                         "message": hint_text,
-                        "score": current_score,
                         "local_error": latest_local_err,
+                        "perf": {
+                            "processed_fps": float(completed_frames / wall_elapsed_s),
+                            "preview_fps": float(preview_sent_count / wall_elapsed_s),
+                            "state_fps": float(state_sent_count / wall_elapsed_s),
+                            "timeline_lag_ms": float(timeline_lag_ms),
+                            "skipped_frames": int(skipped_capture_frames),
+                        },
                     }
                 )
 
-            live_preview_frame = compose_live_query_frame(
-                qry_frame=query_view,
-                score=current_score,
-                current_local_err=latest_local_err,
-                active_hint=hint_text,
-                phase_name=latest_phase_name,
-                phase_cue=latest_phase_cue,
+            should_push_preview = frame_callback is not None and (
+                accepted_hint is not None
+                or preview_sent_count == 0
+                or (
+                    completed_frames % preview_update_stride == 0
+                    and (wall_elapsed_s - last_preview_push_at) >= preview_min_interval_s
+                )
             )
-            if frame_callback is not None:
+            if should_push_preview and frame_callback is not None:
+                if query_overlay_view is None:
+                    query_overlay_view = query_view.copy()
+                    if raw_pts is not None:
+                        draw_pose_skeleton(query_overlay_view, raw_pts)
+                live_preview_frame = compose_live_query_frame(
+                    qry_frame=query_overlay_view,
+                    score=0.0,
+                    current_local_err=latest_local_err,
+                    active_hint=hint_text,
+                    phase_name=latest_phase_name,
+                    phase_cue=latest_phase_cue,
+                )
+                preview_sent_count += 1
+                last_preview_push_at = wall_elapsed_s
                 frame_callback(live_preview_frame)
 
             output_frame = None
             if record_compare_video:
+                if query_overlay_view is None:
+                    query_overlay_view = query_view.copy()
+                    if raw_pts is not None:
+                        draw_pose_skeleton(query_overlay_view, raw_pts)
                 output_frame = compose_compare_frame(
                     ref_frame=ref_view,
-                    qry_frame=query_view,
-                    score=current_score,
+                    qry_frame=query_overlay_view,
+                    score=0.0,
                     current_local_err=latest_local_err,
                     active_hint=hint_text,
                     align_info={
@@ -1037,24 +1196,69 @@ def run_camera_coach(
     if preview:
         close_preview_windows()
 
+    total_wall_elapsed_s = max(time.perf_counter() - session_start_time, 1e-6)
+    final_query_time_s = float(query_time_s[-1]) if query_time_s else 0.0
+    final_perf = {
+        "processed_fps": float(processed_idx / total_wall_elapsed_s),
+        "preview_fps": float(preview_sent_count / total_wall_elapsed_s),
+        "state_fps": float(state_sent_count / total_wall_elapsed_s),
+        "timeline_lag_ms": float(max(0.0, (total_wall_elapsed_s - final_query_time_s) * 1000.0) if use_video_timeline else 0.0),
+        "skipped_frames": int(skipped_capture_frames),
+        "wall_elapsed_s": float(total_wall_elapsed_s),
+    }
+
+    global_score = _score_live_pose_sequence(
+        ref_data=ref_data,
+        points_seq=query_points_seq,
+        raw_points_seq=query_raw_points_seq,
+        frame_indices=query_frame_indices,
+        time_s=query_time_s,
+        fps=fps,
+        score_scale=score_scale,
+        hint_threshold=hint_threshold,
+        hint_min_interval=hint_min_interval,
+        max_hints=max_hints,
+    )
+    final_hints = global_score["hints"] or live_hints
     summary = {
         "mode": "baduanjin_camera_coach",
         "reference_video": ref_video_path,
         "camera_source": str(camera_source),
-        "matched_frames": int(len(running_scores)),
-        "avg_score_0_100": float(np.mean(running_scores)) if running_scores else 0.0,
+        "matched_frames": int(global_score["matched_frames"]),
+        "avg_score_0_100": float(global_score["avg_score_0_100"]),
+        "score_0_100": float(global_score["score_0_100"]),
+        "normalized_dtw_distance": float(global_score["normalized_dtw_distance"]),
+        "dtw_distance": float(global_score["dtw_distance"]),
+        "alignment_path_length": int(global_score["alignment_path_length"]),
         "final_phase_name": latest_phase_name,
         "final_phase_cue": latest_phase_cue,
         "final_substage_key": latest_substage_key,
         "final_substage_name": latest_substage_name,
         "final_substage_cue": latest_substage_cue,
         "final_part": latest_part,
-        "hint_count": int(len(live_hints)),
-        "hints": live_hints,
+        "hint_count": int(len(final_hints)),
+        "hints": final_hints,
+        "live_hints": live_hints,
         "error_frame_count": int(len(error_frames)),
         "error_frames": error_frames,
         "template_path": template_path,
         "output_video": actual_out_video,
+        "perf": final_perf,
+        "runtime_state": {
+            "query_frame": int(query_frame_indices[-1]) if query_frame_indices else 0,
+            "query_time_s": final_query_time_s,
+            "ref_frame": int(ref_data["frame_indices"][current_ref_seq_idx]) if ref_length else 0,
+            "ref_time_s": float(ref_data["time_s"][current_ref_seq_idx]) if ref_times.size else 0.0,
+            "phase_name": latest_phase_name,
+            "phase_cue": latest_phase_cue,
+            "substage_key": latest_substage_key,
+            "substage_name": latest_substage_name,
+            "substage_cue": latest_substage_cue,
+            "part": latest_part,
+            "message": "",
+            "local_error": latest_local_err,
+            "perf": final_perf,
+        },
     }
     if out_json:
         ensure_parent_dir(out_json)

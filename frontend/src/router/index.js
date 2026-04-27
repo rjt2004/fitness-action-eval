@@ -3,6 +3,7 @@ import { createRouter, createWebHistory } from "vue-router";
 import MainLayout from "@/layout/MainLayout.vue";
 import Login from "@/views/Login.vue";
 import Dashboard from "@/views/Dashboard.vue";
+import UserManagement from "@/views/UserManagement.vue";
 import TemplateList from "@/views/template/TemplateList.vue";
 import EvaluationCreate from "@/views/evaluation/EvaluationCreate.vue";
 import EvaluationList from "@/views/evaluation/EvaluationList.vue";
@@ -34,6 +35,12 @@ const router = createRouter({
           name: "dashboard",
           component: Dashboard,
           meta: { role: "admin", title: "系统概览" },
+        },
+        {
+          path: "users",
+          name: "users",
+          component: UserManagement,
+          meta: { role: "admin", title: "用户管理" },
         },
         {
           path: "templates",
@@ -82,7 +89,6 @@ const router = createRouter({
   ],
 });
 
-// 统一做登录校验和角色跳转。
 router.beforeEach((to) => {
   const authStore = useAuthStore();
   authStore.hydrate();

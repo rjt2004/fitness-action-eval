@@ -2,7 +2,7 @@ from rest_framework.permissions import BasePermission
 
 
 class IsAdminRole(BasePermission):
-    """仅允许管理员访问的权限类。"""
+    """仅允许管理员角色访问。"""
 
     message = "只有管理员可以执行该操作。"
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from django.conf import settings
 from django.db import models
 
+from fitness_action_eval.baduanjin import default_baduanjin_rule_config
 from fitness_action_eval.model_options import DEFAULT_TEMPLATE_MODEL_KEY, get_pose_model_choices
 
 
@@ -48,6 +49,7 @@ class TemplateVideo(models.Model):
         default=DEFAULT_TEMPLATE_MODEL_KEY,
         verbose_name="姿态模型",
     )
+    rule_config = models.JSONField(default=default_baduanjin_rule_config, blank=True, verbose_name="动作评分规则")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT, verbose_name="状态")
     progress_percent = models.PositiveIntegerField(default=0, verbose_name="进度百分比")
     progress_text = models.CharField(max_length=100, blank=True, default="", verbose_name="进度说明")

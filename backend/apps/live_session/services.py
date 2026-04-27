@@ -20,6 +20,9 @@ from .models import LiveSession
 
 _SESSION_REGISTRY: dict[int, dict[str, object]] = {}
 _REGISTRY_LOCK = threading.Lock()
+_PREVIEW_MIN_INTERVAL_S = 0.20
+_PREVIEW_TARGET_WIDTH = 480
+_PREVIEW_JPEG_QUALITY = 42
 
 
 def generate_session_no() -> str:
@@ -81,18 +84,18 @@ def _update_preview_frame(session_id: int, frame) -> None:
             return
         last_frame_at = float(entry.get("last_frame_at", 0.0))
         now = time.perf_counter()
-        if now - last_frame_at < 0.12:
+        if now - last_frame_at < _PREVIEW_MIN_INTERVAL_S:
             return
 
     preview_frame = frame
     height, width = preview_frame.shape[:2]
-    target_width = 640
+    target_width = _PREVIEW_TARGET_WIDTH
     if width > target_width:
         scale = target_width / float(width)
         target_height = max(1, int(round(height * scale)))
         preview_frame = cv2.resize(preview_frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
 
-    ok, encoded = cv2.imencode(".jpg", preview_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 55])
+    ok, encoded = cv2.imencode(".jpg", preview_frame, [int(cv2.IMWRITE_JPEG_QUALITY), _PREVIEW_JPEG_QUALITY])
     if not ok:
         return
     with _REGISTRY_LOCK:
@@ -111,6 +114,15 @@ def _update_runtime_state(session_id: int, state: dict) -> None:
         if entry is None:
             return
         entry["latest_state"] = dict(state)
+
+
+def _get_registry_latest_state(session_id: int) -> dict:
+    with _REGISTRY_LOCK:
+        entry = _SESSION_REGISTRY.get(session_id)
+        if entry is None:
+            return {}
+        state = entry.get("latest_state", {})
+    return dict(state) if isinstance(state, dict) else {}
 
 
 def _run_live_session_worker(session_id: int, stop_event: threading.Event) -> None:
@@ -159,12 +171,16 @@ def _run_live_session_worker(session_id: int, stop_event: threading.Event) -> No
             out_error_frames_dir=error_frames_dir,
             preview=False,
             stop_checker=stop_event.is_set,
-            pause_checker=None,
             frame_callback=lambda frame: _update_preview_frame(session_id, frame),
             state_callback=lambda state: _update_runtime_state(session_id, state),
         )
         summary["summary_json_path"] = summary_path
         summary["output_video"] = ""
+        latest_state = _get_registry_latest_state(session_id)
+        if latest_state:
+            summary["runtime_state"] = latest_state
+            if isinstance(latest_state.get("perf"), dict):
+                summary["perf"] = dict(latest_state["perf"])
         final_status = LiveSession.Status.STOPPED if stop_event.is_set() else LiveSession.Status.SUCCESS
         session.refresh_from_db()
         _update_session_summary(session, summary, final_status)

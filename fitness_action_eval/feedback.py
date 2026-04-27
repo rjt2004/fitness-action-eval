@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """评分后的局部偏差分析与提示生成。"""
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 
@@ -20,6 +20,7 @@ def part_errors(
     ref_angles: Optional[np.ndarray] = None,
     qry_angles: Optional[np.ndarray] = None,
     phase_id: Optional[int] = None,
+    rule_config: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Dict[str, float]]:
     """统计各身体部位相对模板的偏差。
 
@@ -41,7 +42,7 @@ def part_errors(
         "left_knee": 6,
         "right_knee": 7,
     }
-    phase = get_phase_definition(phase_id) if phase_id is not None else None
+    phase = get_phase_definition(phase_id, rule_config=rule_config) if phase_id is not None else None
 
     for part, idxs in FEEDBACK_PART_GROUPS.items():
         delta = qry_pts[idxs] - ref_pts[idxs]
@@ -78,6 +79,7 @@ def build_live_feedback(
     substage_key: Optional[str] = None,
     ref_angles: Optional[np.ndarray] = None,
     qry_angles: Optional[np.ndarray] = None,
+    rule_config: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[str, float, Optional[str]]:
     """为实时模式生成单帧提示。"""
 
@@ -87,10 +89,11 @@ def build_live_feedback(
         ref_angles=ref_angles,
         qry_angles=qry_angles,
         phase_id=phase_id,
+        rule_config=rule_config,
     )
 
     if phase_id is not None:
-        phase = get_phase_definition(phase_id)
+        phase = get_phase_definition(phase_id, rule_config=rule_config)
         part_order = list(phase.feedback_priority)
         effective_threshold = hint_threshold * float(phase.feedback_threshold_scale)
     else:
@@ -109,6 +112,7 @@ def build_live_feedback(
         dx=best_info["dx"],
         dy=best_info["dy"],
         substage_key=substage_key,
+        rule_config=rule_config,
     )
     return message, point_err, best_part
 
@@ -127,6 +131,7 @@ def build_feedback(
     ref_substage_cues: Optional[np.ndarray] = None,
     ref_angles: Optional[np.ndarray] = None,
     qry_angles: Optional[np.ndarray] = None,
+    rule_config: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], np.ndarray]:
     """沿着 DTW 对齐路径生成离线提示和每帧局部误差。"""
 
@@ -147,6 +152,7 @@ def build_feedback(
             ref_angles=ref_angles[i] if ref_angles is not None else None,
             qry_angles=qry_angles[j] if qry_angles is not None else None,
             phase_id=phase_id,
+            rule_config=rule_config,
         )
         local_err = float(np.mean(np.linalg.norm(qry_points[j] - ref_points[i], axis=1)))
         local_sum[j] += local_err
@@ -158,7 +164,7 @@ def build_feedback(
             continue
 
         if phase_id is not None:
-            phase = get_phase_definition(phase_id)
+            phase = get_phase_definition(phase_id, rule_config=rule_config)
             part_candidates = list(phase.feedback_priority)
             effective_threshold = hint_threshold * float(phase.feedback_threshold_scale)
         else:
@@ -196,6 +202,7 @@ def build_feedback(
                     dx=float(info["dx"]),
                     dy=float(info["dy"]),
                     substage_key=substage_key,
+                    rule_config=rule_config,
                 ),
             }
         )
