@@ -24,6 +24,10 @@ const phasePlots = computed(() =>
     imageUrl: toMediaUrl(item.image_path),
   })),
 );
+const phaseScores = computed(() => detail.value?.result_payload?.phase_scores || []);
+const substageScores = computed(() => detail.value?.result_payload?.substage_scores || []);
+const partScores = computed(() => detail.value?.result_payload?.part_scores || []);
+const poseQuality = computed(() => detail.value?.result_payload?.pose_quality || {});
 
 const isRunning = computed(() => ["pending", "running"].includes(detail.value?.status || ""));
 
@@ -66,8 +70,6 @@ onBeforeUnmount(clearPolling);
 
 <template>
   <div class="page-shell">
-    <h2 class="page-title">评估详情</h2>
-
     <el-skeleton :loading="loading" animated :rows="10">
       <template #default>
         <section v-if="detail && isRunning" class="soft-card detail-panel progress-panel">
@@ -160,6 +162,87 @@ onBeforeUnmount(clearPolling);
         </section>
 
         <section class="soft-card detail-panel" style="margin-top: 20px">
+          <h3 class="section-title">阶段与部位评分</h3>
+          <div v-if="phaseScores.length" class="score-table-wrap">
+            <el-table :data="phaseScores" size="small" border>
+              <el-table-column prop="phase_name" label="阶段" min-width="180" />
+              <el-table-column prop="score_0_100" label="阶段分" width="110">
+                <template #default="{ row }">{{ Number(row.score_0_100 || 0).toFixed(1) }}</template>
+              </el-table-column>
+              <el-table-column prop="normalized_distance" label="平均距离" width="110">
+                <template #default="{ row }">{{ Number(row.normalized_distance || 0).toFixed(3) }}</template>
+              </el-table-column>
+              <el-table-column prop="reference_mean_confidence" label="标准置信度" width="120">
+                <template #default="{ row }">
+                  {{ row.reference_mean_confidence !== null && row.reference_mean_confidence !== undefined ? Number(row.reference_mean_confidence).toFixed(2) : "--" }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="query_mean_confidence" label="待测置信度" width="120">
+                <template #default="{ row }">
+                  {{ row.query_mean_confidence !== null && row.query_mean_confidence !== undefined ? Number(row.query_mean_confidence).toFixed(2) : "--" }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="alignment_count" label="对齐帧数" width="100" />
+            </el-table>
+          </div>
+          <el-empty v-else description="当前任务暂无阶段评分" />
+
+          <div v-if="partScores.length" class="part-score-grid">
+            <div v-for="item in partScores" :key="item.part" class="part-score-card">
+              <div class="part-score-card__name">{{ item.part_name || item.part }}</div>
+              <div class="part-score-card__score">{{ Number(item.score_0_100 || 0).toFixed(1) }}</div>
+              <div class="part-score-card__meta">误差 {{ Number(item.part_error || 0).toFixed(3) }}</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="soft-card detail-panel" style="margin-top: 20px">
+          <h3 class="section-title">子阶段评分</h3>
+          <div v-if="substageScores.length" class="score-table-wrap">
+            <el-table :data="substageScores" size="small" border>
+              <el-table-column prop="phase_name" label="阶段" min-width="160" />
+              <el-table-column prop="substage_name" label="子阶段" min-width="150" />
+              <el-table-column prop="score_0_100" label="分数" width="100">
+                <template #default="{ row }">{{ Number(row.score_0_100 || 0).toFixed(1) }}</template>
+              </el-table-column>
+              <el-table-column prop="normalized_distance" label="平均距离" width="110">
+                <template #default="{ row }">{{ Number(row.normalized_distance || 0).toFixed(3) }}</template>
+              </el-table-column>
+              <el-table-column prop="reference_mean_confidence" label="标准置信度" width="120">
+                <template #default="{ row }">
+                  {{ row.reference_mean_confidence !== null && row.reference_mean_confidence !== undefined ? Number(row.reference_mean_confidence).toFixed(2) : "--" }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="query_mean_confidence" label="待测置信度" width="120">
+                <template #default="{ row }">
+                  {{ row.query_mean_confidence !== null && row.query_mean_confidence !== undefined ? Number(row.query_mean_confidence).toFixed(2) : "--" }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="alignment_count" label="对齐帧数" width="100" />
+            </el-table>
+          </div>
+          <el-empty v-else description="当前任务暂无子阶段评分" />
+        </section>
+
+        <section class="soft-card detail-panel" style="margin-top: 20px">
+          <h3 class="section-title">姿态识别质量</h3>
+          <div class="quality-grid">
+            <div class="quality-card">
+              <div class="quality-card__title">参考视频</div>
+              <div>有效帧 {{ poseQuality.reference?.valid_pose_frames ?? "--" }}</div>
+              <div>跳过帧 {{ poseQuality.reference?.skipped_frames ?? "--" }}</div>
+              <div>平均置信度 {{ Number(poseQuality.reference?.mean_confidence || 0).toFixed(3) }}</div>
+            </div>
+            <div class="quality-card">
+              <div class="quality-card__title">待测视频</div>
+              <div>有效帧 {{ poseQuality.query?.valid_pose_frames ?? "--" }}</div>
+              <div>跳过帧 {{ poseQuality.query?.skipped_frames ?? "--" }}</div>
+              <div>平均置信度 {{ Number(poseQuality.query?.mean_confidence || 0).toFixed(3) }}</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="soft-card detail-panel" style="margin-top: 20px">
           <h3 class="section-title">纠错提示</h3>
           <div v-if="hints.length" class="hint-scroll">
             <div
@@ -230,7 +313,9 @@ onBeforeUnmount(clearPolling);
   gap: 14px;
 }
 
-.phase-plot-card {
+.phase-plot-card,
+.part-score-card,
+.quality-card {
   padding: 12px;
   border: 1px solid rgba(15, 23, 42, 0.08);
   border-radius: 16px;
@@ -250,6 +335,42 @@ onBeforeUnmount(clearPolling);
   width: 100%;
   border-radius: 10px;
   border: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.score-table-wrap {
+  margin-bottom: 16px;
+}
+
+.part-score-grid,
+.quality-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.quality-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.part-score-card__name,
+.quality-card__title {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.part-score-card__score {
+  margin-top: 8px;
+  color: #0f172a;
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.part-score-card__meta,
+.quality-card {
+  color: #64748b;
+  line-height: 1.7;
 }
 
 .hint-scroll {
@@ -289,7 +410,8 @@ onBeforeUnmount(clearPolling);
 }
 
 @media (max-width: 1200px) {
-  .task-info-grid {
+  .task-info-grid,
+  .part-score-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -299,7 +421,10 @@ onBeforeUnmount(clearPolling);
 }
 
 @media (max-width: 768px) {
-  .phase-plot-grid {
+  .phase-plot-grid,
+  .task-info-grid,
+  .part-score-grid,
+  .quality-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -20,6 +20,7 @@ def part_errors(
     ref_angles: Optional[np.ndarray] = None,
     qry_angles: Optional[np.ndarray] = None,
     phase_id: Optional[int] = None,
+    substage_key: Optional[str] = None,
     rule_config: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Dict[str, float]]:
     """统计各身体部位相对模板的偏差。
@@ -50,6 +51,31 @@ def part_errors(
         point_err = float(np.mean(dxy))
         dx = float(np.mean(delta[:, 0]))
         dy = float(np.mean(delta[:, 1]))
+
+        if phase_id == 6 and substage_key == "bend_touch" and part == "hands":
+            # 俯身攀足阶段手腕常被头发、躯干和腿部遮挡，直接比较手部全部关键点会过分惩罚。
+            # 这里改为比较手相对脚、髋和身体中线的位置关系，更贴近“两手沿腿下探”的动作目标。
+            ref_left_gap = min(float(np.linalg.norm(ref_pts[15] - ref_pts[idx])) for idx in (27, 29, 31))
+            ref_right_gap = min(float(np.linalg.norm(ref_pts[16] - ref_pts[idx])) for idx in (28, 30, 32))
+            qry_left_gap = min(float(np.linalg.norm(qry_pts[15] - qry_pts[idx])) for idx in (27, 29, 31))
+            qry_right_gap = min(float(np.linalg.norm(qry_pts[16] - qry_pts[idx])) for idx in (28, 30, 32))
+            gap_err = (abs(qry_left_gap - ref_left_gap) + abs(qry_right_gap - ref_right_gap)) / 2.0
+
+            ref_hip_center = (ref_pts[23] + ref_pts[24]) / 2.0
+            qry_hip_center = (qry_pts[23] + qry_pts[24]) / 2.0
+            ref_hand_y = float(((ref_pts[15, 1] + ref_pts[16, 1]) / 2.0) - ref_hip_center[1])
+            qry_hand_y = float(((qry_pts[15, 1] + qry_pts[16, 1]) / 2.0) - qry_hip_center[1])
+            vertical_err = abs(qry_hand_y - ref_hand_y)
+
+            ref_hand_center = (ref_pts[15] + ref_pts[16]) / 2.0
+            qry_hand_center = (qry_pts[15] + qry_pts[16]) / 2.0
+            ref_body_center = (ref_pts[11] + ref_pts[12] + ref_pts[23] + ref_pts[24]) / 4.0
+            qry_body_center = (qry_pts[11] + qry_pts[12] + qry_pts[23] + qry_pts[24]) / 4.0
+            centerline_err = abs(float((qry_hand_center[0] - qry_body_center[0]) - (ref_hand_center[0] - ref_body_center[0])))
+
+            point_err = float((0.60 * gap_err) + (0.30 * vertical_err) + (0.10 * centerline_err))
+            dx = float((qry_hand_center[0] - qry_body_center[0]) - (ref_hand_center[0] - ref_body_center[0]))
+            dy = float(qry_hand_y - ref_hand_y)
 
         angle_names = PART_TO_ANGLE_NAMES.get(part, [])
         if ref_angles is not None and qry_angles is not None and angle_names:
@@ -89,6 +115,7 @@ def build_live_feedback(
         ref_angles=ref_angles,
         qry_angles=qry_angles,
         phase_id=phase_id,
+        substage_key=substage_key,
         rule_config=rule_config,
     )
 
@@ -152,6 +179,7 @@ def build_feedback(
             ref_angles=ref_angles[i] if ref_angles is not None else None,
             qry_angles=qry_angles[j] if qry_angles is not None else None,
             phase_id=phase_id,
+            substage_key=substage_key,
             rule_config=rule_config,
         )
         local_err = float(np.mean(np.linalg.norm(qry_points[j] - ref_points[i], axis=1)))

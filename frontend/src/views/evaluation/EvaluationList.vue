@@ -59,8 +59,6 @@ onBeforeUnmount(clearPolling);
 
 <template>
   <div class="page-shell">
-    <h2 class="page-title">评估结果</h2>
-
     <section class="soft-card page-panel">
       <el-table :data="tableData" stripe style="width: 100%">
         <el-table-column prop="task_no" label="任务编号" min-width="220" />

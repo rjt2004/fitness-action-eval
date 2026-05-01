@@ -27,7 +27,7 @@ from fitness_action_eval.baduanjin import (
     weight_single_feature,
 )
 from fitness_action_eval.dtw import distance_to_score, dtw_distance_multidim
-from fitness_action_eval.feedback import build_feedback, build_live_feedback
+from fitness_action_eval.feedback import build_feedback, build_live_feedback, part_errors
 from fitness_action_eval.pose import (
     LiveStreamPoseDetector,
     build_current_feature,
@@ -35,6 +35,7 @@ from fitness_action_eval.pose import (
     create_pose_landmarker,
     detect_pose_in_frame,
     extract_pose_sequence,
+    pose_quality_summary,
 )
 from fitness_action_eval.visualization import (
     close_preview_windows,
@@ -65,14 +66,33 @@ def _ensure_baduanjin_features(data: Dict[str, Any]) -> Dict[str, Any]:
     rule_config = data.get("rule_config") or default_baduanjin_rule_config()
     data["rule_config"] = rule_config
     if "angle_features" not in data or "combined_features_raw" not in data or "feature_mean" not in data or "feature_std" not in data:
-        feature_bundle = build_pose_feature_bundle(data["points"])
+        feature_bundle = build_pose_feature_bundle(data["points"], point_confidence=data.get("point_confidence"))
         data["angle_features"] = feature_bundle["angle_features"]
         data["combined_features_raw"] = feature_bundle["combined_features_raw"]
         data["feature_mean"] = feature_bundle["feature_mean"]
         data["feature_std"] = feature_bundle["feature_std"]
         data["base_features"] = feature_bundle["base_features"]
+        data["point_confidence"] = feature_bundle["point_confidence"]
+        data["point_confidence_source"] = data.get("point_confidence_source", "mediapipe")
+        data["feature_confidence_weights"] = feature_bundle["feature_confidence_weights"]
     else:
         data["base_features"] = data.get("base_features", data["features"])
+        if data.get("point_confidence") is None:
+            data["point_confidence"] = np.ones((data["points"].shape[0], 33), dtype=np.float32)
+            data["point_confidence_source"] = data.get("point_confidence_source", "legacy_default")
+        else:
+            data["point_confidence_source"] = data.get("point_confidence_source", "mediapipe")
+        if data.get("feature_confidence_weights") is None:
+            feature_bundle = build_pose_feature_bundle(data["points"], point_confidence=data["point_confidence"])
+            data["feature_confidence_weights"] = feature_bundle["feature_confidence_weights"]
+    if not data.get("pose_quality"):
+        processed_frames = int(data.get("frame_indices", np.asarray([])).shape[0])
+        data["pose_quality"] = pose_quality_summary(
+            data["point_confidence"],
+            processed_frames=processed_frames,
+            skipped_frames=0,
+        )
+    data["pose_quality"]["confidence_source"] = data.get("point_confidence_source", "mediapipe")
 
     data["phase_ids"] = build_phase_ids(
         int(data["points"].shape[0]),
@@ -95,9 +115,15 @@ def _apply_template_feature_stats(qry_data: Dict[str, Any], ref_data: Dict[str, 
     """把待测序列投影到模板特征标准化空间。"""
 
     if qry_data.get("combined_features_raw") is None:
-        feature_bundle = build_pose_feature_bundle(qry_data["points"])
+        feature_bundle = build_pose_feature_bundle(qry_data["points"], point_confidence=qry_data.get("point_confidence"))
         qry_data["angle_features"] = feature_bundle["angle_features"]
         qry_data["combined_features_raw"] = feature_bundle["combined_features_raw"]
+        qry_data["point_confidence"] = feature_bundle["point_confidence"]
+        qry_data["feature_confidence_weights"] = feature_bundle["feature_confidence_weights"]
+    elif qry_data.get("feature_confidence_weights") is None:
+        feature_bundle = build_pose_feature_bundle(qry_data["points"], point_confidence=qry_data.get("point_confidence"))
+        qry_data["point_confidence"] = feature_bundle["point_confidence"]
+        qry_data["feature_confidence_weights"] = feature_bundle["feature_confidence_weights"]
     feature_mean = ref_data["feature_mean"]
     feature_std = np.maximum(ref_data["feature_std"], 1e-6)
     qry_data["feature_mean"] = feature_mean
@@ -122,6 +148,13 @@ def _template_payload(ref_video: str, task_model: str, num_poses: int, smooth_wi
         "combined_features_raw": ref_data["combined_features_raw"],
         "feature_mean": ref_data["feature_mean"],
         "feature_std": ref_data["feature_std"],
+        "point_confidence": ref_data.get("point_confidence", np.ones((ref_data["points"].shape[0], 33), dtype=np.float32)),
+        "point_confidence_source": np.asarray(ref_data.get("point_confidence_source", "mediapipe")),
+        "feature_confidence_weights": ref_data.get(
+            "feature_confidence_weights",
+            np.ones_like(ref_data["features"], dtype=np.float32),
+        ),
+        "pose_quality_json": np.asarray(json.dumps(ref_data.get("pose_quality", {}), ensure_ascii=False)),
         "phase_ids": ref_data["phase_ids"],
         "substage_keys": ref_data["substage_keys"],
         "substage_names": ref_data["substage_names"],
@@ -221,6 +254,12 @@ def load_pose_template(template_path: str) -> Dict[str, Any]:
                 rule_config = json.loads(str(data["rule_config_json"].item()))
             except (TypeError, json.JSONDecodeError):
                 rule_config = default_baduanjin_rule_config()
+        has_point_confidence = "point_confidence" in data
+        confidence_source = (
+            str(data["point_confidence_source"].item())
+            if "point_confidence_source" in data
+            else ("mediapipe" if has_point_confidence else "legacy_default")
+        )
         loaded = {
             "reference_video": str(data["reference_video"].item()),
             "task_model": str(data["task_model"].item()),
@@ -234,6 +273,9 @@ def load_pose_template(template_path: str) -> Dict[str, Any]:
             "combined_features_raw": data["combined_features_raw"] if "combined_features_raw" in data else None,
             "feature_mean": data["feature_mean"] if "feature_mean" in data else None,
             "feature_std": data["feature_std"] if "feature_std" in data else None,
+            "point_confidence": data["point_confidence"] if has_point_confidence else None,
+            "point_confidence_source": confidence_source,
+            "feature_confidence_weights": data["feature_confidence_weights"] if "feature_confidence_weights" in data else None,
             "phase_ids": data["phase_ids"] if "phase_ids" in data else None,
             "substage_keys": data["substage_keys"] if "substage_keys" in data else None,
             "substage_names": data["substage_names"] if "substage_names" in data else None,
@@ -244,6 +286,11 @@ def load_pose_template(template_path: str) -> Dict[str, Any]:
             "time_s": data["time_s"],
             "fps": float(data["fps"].item()),
         }
+        if "pose_quality_json" in data:
+            try:
+                loaded["pose_quality"] = json.loads(str(data["pose_quality_json"].item()))
+            except (TypeError, json.JSONDecodeError):
+                loaded["pose_quality"] = {}
     return _ensure_baduanjin_features(loaded)
 
 
@@ -258,6 +305,321 @@ def _phase_maps_for_query(
         frame_phase_map[int(query_frame)] = phase.display_name
         frame_cue_map[int(query_frame)] = phase.cue
     return frame_phase_map, frame_cue_map
+
+
+PART_SCORE_NAMES = {
+    "head_neck": "头颈",
+    "shoulders": "肩臂",
+    "hands": "手部",
+    "torso": "躯干",
+    "waist": "腰胯",
+    "hips": "髋部",
+    "knees": "膝部",
+    "feet": "脚步",
+}
+
+PHASE_SCORE_SCALE_MULTIPLIER = {
+    5: 1.45,
+    6: 1.55,
+}
+
+PART_SCORE_SCALE_MULTIPLIER = {
+    "hands": 2.0,
+}
+
+
+def _confidence_weighted_cost(
+    ref_feature: np.ndarray,
+    qry_feature: np.ndarray,
+    ref_weight: Optional[np.ndarray] = None,
+    qry_weight: Optional[np.ndarray] = None,
+) -> float:
+    diff = ref_feature - qry_feature
+    if ref_weight is None or qry_weight is None:
+        return float(np.linalg.norm(diff))
+    weight = np.sqrt(np.maximum(ref_weight * qry_weight, 0.0))
+    active = max(float(np.mean(weight)), 1e-6)
+    return float(np.linalg.norm(diff * weight) / np.sqrt(active))
+
+
+def _score_scale_for_phase(phase_id: int, base_score_scale: float) -> float:
+    return float(base_score_scale) * float(PHASE_SCORE_SCALE_MULTIPLIER.get(int(phase_id), 1.0))
+
+
+def _adaptive_distance_score(norm_dist: float, score_scale: float, phase_id: Optional[int] = None) -> float:
+    linear_score = distance_to_score(norm_dist, score_scale)
+    if phase_id not in PHASE_SCORE_SCALE_MULTIPLIER:
+        return linear_score
+    soft_tail = min(25.0, 100.0 * float(np.exp(-float(norm_dist) / max(1e-6, float(score_scale)))))
+    return float(max(linear_score, soft_tail))
+
+
+def _unique_sorted_indices(indices: list[int]) -> np.ndarray:
+    if not indices:
+        return np.asarray([], dtype=np.int32)
+    return np.asarray(sorted(set(int(idx) for idx in indices)), dtype=np.int32)
+
+
+def _local_normalized_dtw(
+    ref_data: Dict[str, Any],
+    qry_data: Dict[str, Any],
+    ref_indices: list[int],
+    qry_indices: list[int],
+) -> Optional[float]:
+    ref_idx = _unique_sorted_indices(ref_indices)
+    qry_idx = _unique_sorted_indices(qry_indices)
+    if ref_idx.size < 2 or qry_idx.size < 2:
+        return None
+
+    ref_weights = ref_data.get("feature_confidence_weights")
+    qry_weights = qry_data.get("feature_confidence_weights")
+    try:
+        dist, local_path = dtw_distance_multidim(
+            ref_data["features"][ref_idx],
+            qry_data["features"][qry_idx],
+            window_ratio=0.35,
+            a_weights=ref_weights[ref_idx] if ref_weights is not None else None,
+            b_weights=qry_weights[qry_idx] if qry_weights is not None else None,
+        )
+    except RuntimeError:
+        return None
+    return float(dist / max(1, len(local_path)))
+
+
+def _bend_touch_goal_cost(
+    ref_pts: np.ndarray,
+    qry_pts: np.ndarray,
+    ref_angles: Optional[np.ndarray],
+    qry_angles: Optional[np.ndarray],
+) -> float:
+    ref_left_gap = min(float(np.linalg.norm(ref_pts[15] - ref_pts[idx])) for idx in (27, 29, 31))
+    ref_right_gap = min(float(np.linalg.norm(ref_pts[16] - ref_pts[idx])) for idx in (28, 30, 32))
+    qry_left_gap = min(float(np.linalg.norm(qry_pts[15] - qry_pts[idx])) for idx in (27, 29, 31))
+    qry_right_gap = min(float(np.linalg.norm(qry_pts[16] - qry_pts[idx])) for idx in (28, 30, 32))
+    gap_err = (abs(qry_left_gap - ref_left_gap) + abs(qry_right_gap - ref_right_gap)) / 2.0
+
+    ref_hip_center = (ref_pts[23] + ref_pts[24]) / 2.0
+    qry_hip_center = (qry_pts[23] + qry_pts[24]) / 2.0
+    ref_hand_y = float(((ref_pts[15, 1] + ref_pts[16, 1]) / 2.0) - ref_hip_center[1])
+    qry_hand_y = float(((qry_pts[15, 1] + qry_pts[16, 1]) / 2.0) - qry_hip_center[1])
+    vertical_err = abs(qry_hand_y - ref_hand_y)
+
+    hip_err = 0.0
+    knee_err = 0.0
+    if ref_angles is not None and qry_angles is not None:
+        hip_err = float(np.mean(np.abs(qry_angles[[4, 5]] - ref_angles[[4, 5]])))
+        knee_err = float(np.mean(np.abs(qry_angles[[6, 7]] - ref_angles[[6, 7]])))
+
+    return float(18.0 * ((0.35 * gap_err) + (0.25 * vertical_err) + (0.25 * hip_err) + (0.15 * knee_err)))
+
+
+def _bend_touch_robust_distance(
+    path: list[tuple[int, int]],
+    ref_data: Dict[str, Any],
+    qry_data: Dict[str, Any],
+    ref_indices: list[int],
+    qry_indices: list[int],
+) -> Optional[float]:
+    ref_set = set(int(idx) for idx in ref_indices)
+    qry_set = set(int(idx) for idx in qry_indices)
+    costs = [
+        _bend_touch_goal_cost(
+            ref_data["points"][i],
+            qry_data["points"][j],
+            ref_data["angle_features"][i] if ref_data.get("angle_features") is not None else None,
+            qry_data["angle_features"][j] if qry_data.get("angle_features") is not None else None,
+        )
+        for i, j in path
+        if int(i) in ref_set and int(j) in qry_set
+    ]
+    if not costs:
+        return None
+    cost_arr = np.asarray(costs, dtype=np.float32)
+    return float(np.percentile(cost_arr, 50))
+
+
+def _mean_point_confidence(data: Dict[str, Any], indices: list[int]) -> Optional[float]:
+    point_confidence = data.get("point_confidence")
+    if point_confidence is None or not indices:
+        return None
+    idx = np.asarray(indices, dtype=np.int32)
+    idx = idx[(idx >= 0) & (idx < len(point_confidence))]
+    if idx.size == 0:
+        return None
+    return float(np.mean(point_confidence[idx]))
+
+
+def _weighted_phase_score(phase_scores: list[dict[str, Any]], fallback: float) -> float:
+    total_weight = sum(max(1, int(row.get("alignment_count", 0))) for row in phase_scores)
+    if total_weight <= 0:
+        return float(fallback)
+    score_sum = sum(float(row.get("score_0_100", 0.0)) * max(1, int(row.get("alignment_count", 0))) for row in phase_scores)
+    return float(score_sum / total_weight)
+
+
+def build_score_breakdowns(
+    path: list[tuple[int, int]],
+    ref_data: Dict[str, Any],
+    qry_data: Dict[str, Any],
+    score_scale: float,
+    hint_threshold: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    phase_acc: Dict[int, Dict[str, Any]] = {}
+    substage_acc: Dict[tuple[int, str], Dict[str, Any]] = {}
+    part_acc: Dict[str, Dict[str, float]] = {}
+    ref_weights = ref_data.get("feature_confidence_weights")
+    qry_weights = qry_data.get("feature_confidence_weights")
+
+    for i, j in path:
+        phase_id = int(ref_data["phase_ids"][i])
+        phase = get_phase_definition(phase_id, rule_config=ref_data.get("rule_config"))
+        local_cost = _confidence_weighted_cost(
+            ref_data["features"][i],
+            qry_data["features"][j],
+            ref_weights[i] if ref_weights is not None else None,
+            qry_weights[j] if qry_weights is not None else None,
+        )
+        phase_row = phase_acc.setdefault(
+            phase_id,
+            {
+                "phase_id": phase_id,
+                "phase_name": phase.display_name,
+                "cue": phase.cue,
+                "distance_sum": 0.0,
+                "alignment_count": 0,
+                "ref_indices": [],
+                "qry_indices": [],
+            },
+        )
+        phase_row["distance_sum"] += local_cost
+        phase_row["alignment_count"] += 1
+        phase_row["ref_indices"].append(int(i))
+        phase_row["qry_indices"].append(int(j))
+
+        substage_key = str(ref_data["substage_keys"][i]) if ref_data.get("substage_keys") is not None else ""
+        substage_name = str(ref_data["substage_names"][i]) if ref_data.get("substage_names") is not None else ""
+        substage_cue = str(ref_data["substage_cues"][i]) if ref_data.get("substage_cues") is not None else ""
+        if substage_key:
+            substage_row = substage_acc.setdefault(
+                (phase_id, substage_key),
+                {
+                    "phase_id": phase_id,
+                    "phase_name": phase.display_name,
+                    "substage_key": substage_key,
+                    "substage_name": substage_name,
+                    "cue": substage_cue,
+                    "distance_sum": 0.0,
+                    "alignment_count": 0,
+                    "ref_indices": [],
+                    "qry_indices": [],
+                },
+            )
+            substage_row["distance_sum"] += local_cost
+            substage_row["alignment_count"] += 1
+            substage_row["ref_indices"].append(int(i))
+            substage_row["qry_indices"].append(int(j))
+
+        p_err = part_errors(
+            ref_pts=ref_data["points"][i],
+            qry_pts=qry_data["points"][j],
+            ref_angles=ref_data["angle_features"][i] if ref_data.get("angle_features") is not None else None,
+            qry_angles=qry_data["angle_features"][j] if qry_data.get("angle_features") is not None else None,
+            phase_id=phase_id,
+            substage_key=substage_key,
+            rule_config=ref_data.get("rule_config"),
+        )
+        for part, info in p_err.items():
+            row = part_acc.setdefault(
+                part,
+                {"part_error": 0.0, "point_error": 0.0, "angle_error": 0.0, "alignment_count": 0},
+            )
+            row["part_error"] += float(info["score"])
+            row["point_error"] += float(info["point_error"])
+            row["angle_error"] += float(info["angle_error"])
+            row["alignment_count"] += 1
+
+    phase_scores: list[dict[str, Any]] = []
+    for row in sorted(phase_acc.values(), key=lambda item: item["phase_id"]):
+        count = max(1, int(row["alignment_count"]))
+        norm_dist = float(row["distance_sum"] / count)
+        ref_indices = row.pop("ref_indices")
+        qry_indices = row.pop("qry_indices")
+        local_norm_dist = _local_normalized_dtw(ref_data, qry_data, ref_indices, qry_indices)
+        if local_norm_dist is not None:
+            norm_dist = local_norm_dist
+        phase_score_scale = _score_scale_for_phase(int(row["phase_id"]), score_scale)
+        phase_scores.append(
+            {
+                "phase_id": int(row["phase_id"]),
+                "phase_name": str(row["phase_name"]),
+                "cue": str(row["cue"]),
+                "alignment_count": count,
+                "normalized_distance": norm_dist,
+                "score_0_100": _adaptive_distance_score(norm_dist, phase_score_scale, int(row["phase_id"])),
+                "score_scale": phase_score_scale,
+                "reference_mean_confidence": _mean_point_confidence(ref_data, ref_indices),
+                "query_mean_confidence": _mean_point_confidence(qry_data, qry_indices),
+                "reference_start_time_s": float(ref_data["time_s"][min(ref_indices)]),
+                "reference_end_time_s": float(ref_data["time_s"][max(ref_indices)]),
+                "query_start_time_s": float(qry_data["time_s"][min(qry_indices)]),
+                "query_end_time_s": float(qry_data["time_s"][max(qry_indices)]),
+            }
+        )
+
+    substage_scores: list[dict[str, Any]] = []
+    for row in sorted(substage_acc.values(), key=lambda item: (item["phase_id"], min(item["ref_indices"]))):
+        count = max(1, int(row["alignment_count"]))
+        norm_dist = float(row["distance_sum"] / count)
+        ref_indices = row.pop("ref_indices")
+        qry_indices = row.pop("qry_indices")
+        local_norm_dist = _local_normalized_dtw(ref_data, qry_data, ref_indices, qry_indices)
+        if local_norm_dist is not None:
+            norm_dist = local_norm_dist
+        substage_score_scale = _score_scale_for_phase(int(row["phase_id"]), score_scale)
+        if int(row["phase_id"]) == 6 and str(row["substage_key"]) == "bend_touch":
+            bend_touch_dist = _bend_touch_robust_distance(path, ref_data, qry_data, ref_indices, qry_indices)
+            if bend_touch_dist is not None:
+                norm_dist = bend_touch_dist
+        substage_scores.append(
+            {
+                "phase_id": int(row["phase_id"]),
+                "phase_name": str(row["phase_name"]),
+                "substage_key": str(row["substage_key"]),
+                "substage_name": str(row["substage_name"]),
+                "cue": str(row["cue"]),
+                "alignment_count": count,
+                "normalized_distance": norm_dist,
+                "score_0_100": _adaptive_distance_score(norm_dist, substage_score_scale, int(row["phase_id"])),
+                "score_scale": substage_score_scale,
+                "reference_mean_confidence": _mean_point_confidence(ref_data, ref_indices),
+                "query_mean_confidence": _mean_point_confidence(qry_data, qry_indices),
+                "reference_start_time_s": float(ref_data["time_s"][min(ref_indices)]),
+                "reference_end_time_s": float(ref_data["time_s"][max(ref_indices)]),
+                "query_start_time_s": float(qry_data["time_s"][min(qry_indices)]),
+                "query_end_time_s": float(qry_data["time_s"][max(qry_indices)]),
+            }
+        )
+
+    base_part_score_scale = max(0.05, float(hint_threshold) * 3.0)
+    part_scores: list[dict[str, Any]] = []
+    for part, row in part_acc.items():
+        count = max(1, int(row["alignment_count"]))
+        part_error = float(row["part_error"] / count)
+        part_score_scale = base_part_score_scale * float(PART_SCORE_SCALE_MULTIPLIER.get(part, 1.0))
+        part_scores.append(
+            {
+                "part": part,
+                "part_name": PART_SCORE_NAMES.get(part, part),
+                "alignment_count": count,
+                "part_error": part_error,
+                "point_error": float(row["point_error"] / count),
+                "angle_error": float(row["angle_error"] / count),
+                "score_0_100": distance_to_score(part_error, part_score_scale),
+                "score_scale": part_score_scale,
+            }
+        )
+    part_scores.sort(key=lambda item: item["score_0_100"])
+    return phase_scores, substage_scores, part_scores
 
 
 def finalize_scoring_outputs(
@@ -280,7 +642,7 @@ def finalize_scoring_outputs(
     """汇总离线评估结果，并按需生成 JSON、DTW 图和对比视频。"""
 
     norm_dist = dist / max(1, len(path))
-    score = distance_to_score(norm_dist, score_scale)
+    global_dtw_score = distance_to_score(norm_dist, score_scale)
 
     hints, local_error = build_feedback(
         path=path,
@@ -304,6 +666,15 @@ def finalize_scoring_outputs(
         hint["query_frame"] = int(qry_data["frame_indices"][q_idx])
         hint["query_time_s"] = float(qry_data["time_s"][q_idx])
         hint["ref_time_s"] = float(ref_data["time_s"][int(hint["ref_index"])])
+
+    phase_scores, substage_scores, part_scores = build_score_breakdowns(
+        path=path,
+        ref_data=ref_data,
+        qry_data=qry_data,
+        score_scale=score_scale,
+        hint_threshold=hint_threshold,
+    )
+    score = _weighted_phase_score(phase_scores, fallback=global_dtw_score)
 
     ensure_parent_dir(out_json)
     if progress_callback:
@@ -331,6 +702,8 @@ def finalize_scoring_outputs(
         "alignment_path_length": int(len(path)),
         "normalized_dtw_distance": float(norm_dist),
         "score_0_100": float(score),
+        "global_dtw_score_0_100": float(global_dtw_score),
+        "score_method": "phase_local_dtw_weighted_average",
         "score_scale": float(score_scale),
         "hint_threshold": float(hint_threshold),
         "hint_min_interval": int(hint_min_interval),
@@ -341,6 +714,13 @@ def finalize_scoring_outputs(
         "reference_substages": ref_data.get("substage_rows", []),
         "query_substages": qry_data.get("substage_rows", []),
         "phase_plots": phase_plots,
+        "phase_scores": phase_scores,
+        "substage_scores": substage_scores,
+        "part_scores": part_scores,
+        "pose_quality": {
+            "reference": ref_data.get("pose_quality", {}),
+            "query": qry_data.get("pose_quality", {}),
+        },
         "hints": hints,
     }
     with open(out_json, "w", encoding="utf-8") as f:
@@ -369,12 +749,18 @@ def finalize_scoring_outputs(
             frame_error_map[int(frame_id)] = err
 
     frame_pose_map: Dict[int, np.ndarray] = {}
+    frame_confidence_map: Dict[int, np.ndarray] = {}
     for idx, frame_id in enumerate(qry_data["frame_indices"]):
         frame_pose_map[int(frame_id)] = qry_data["raw_points"][idx]
+        if qry_data.get("point_confidence") is not None and len(qry_data["point_confidence"]) > idx:
+            frame_confidence_map[int(frame_id)] = qry_data["point_confidence"][idx]
 
     ref_pose_map: Dict[int, np.ndarray] = {}
+    ref_confidence_map: Dict[int, np.ndarray] = {}
     for idx, frame_id in enumerate(ref_data["frame_indices"]):
         ref_pose_map[int(frame_id)] = ref_data["raw_points"][idx]
+        if ref_data.get("point_confidence") is not None and len(ref_data["point_confidence"]) > idx:
+            ref_confidence_map[int(frame_id)] = ref_data["point_confidence"][idx]
 
     alignment_map = build_query_alignment_map(
         path=path,
@@ -394,7 +780,9 @@ def finalize_scoring_outputs(
             frame_hint_map=frame_hint_map,
             frame_error_map=frame_error_map,
             frame_pose_map=frame_pose_map,
+            frame_confidence_map=frame_confidence_map,
             ref_pose_map=ref_pose_map,
+            ref_confidence_map=ref_confidence_map,
             alignment_map=alignment_map,
             frame_phase_map=frame_phase_map,
             frame_cue_map=frame_cue_map,
@@ -458,7 +846,12 @@ def run_dtw_scoring(
     qry_data = _ensure_baduanjin_features(qry_data)
     if progress_callback:
         progress_callback(42, "正在执行 DTW 对齐")
-    dist, path = dtw_distance_multidim(ref_data["features"], qry_data["features"])
+    dist, path = dtw_distance_multidim(
+        ref_data["features"],
+        qry_data["features"],
+        a_weights=ref_data.get("feature_confidence_weights"),
+        b_weights=qry_data.get("feature_confidence_weights"),
+    )
     if progress_callback:
         progress_callback(50, "正在生成评分结果")
     return finalize_scoring_outputs(
@@ -515,7 +908,12 @@ def run_dtw_scoring_from_template(
     qry_data = _ensure_baduanjin_features(qry_data)
     if progress_callback:
         progress_callback(42, "正在执行 DTW 对齐")
-    dist, path = dtw_distance_multidim(ref_data["features"], qry_data["features"])
+    dist, path = dtw_distance_multidim(
+        ref_data["features"],
+        qry_data["features"],
+        a_weights=ref_data.get("feature_confidence_weights"),
+        b_weights=qry_data.get("feature_confidence_weights"),
+    )
     if progress_callback:
         progress_callback(50, "正在生成评分结果")
     summary = finalize_scoring_outputs(
@@ -548,7 +946,8 @@ def _load_or_prepare_reference(
     frame_stride: int,
 ) -> Dict[str, Any]:
     if template_path and os.path.exists(template_path):
-        return load_pose_template(template_path)
+        ref_data = load_pose_template(template_path)
+        return ref_data
     if not ref_video:
         raise ValueError("Either template_path or ref_video must be provided for camera coaching.")
 
@@ -602,6 +1001,7 @@ def _score_live_pose_sequence(
     ref_data: Dict[str, Any],
     points_seq: list[np.ndarray],
     raw_points_seq: list[np.ndarray],
+    point_confidence_seq: Optional[list[np.ndarray]],
     frame_indices: list[int],
     time_s: list[float],
     fps: float,
@@ -609,6 +1009,9 @@ def _score_live_pose_sequence(
     hint_threshold: float,
     hint_min_interval: int,
     max_hints: int,
+    processed_frames: Optional[int] = None,
+    skipped_frames: int = 0,
+    final_score_stride: int = 3,
 ) -> Dict[str, Any]:
     """实时会话结束后，对整段采集姿态执行与离线一致的全局 DTW 评分。"""
 
@@ -622,25 +1025,69 @@ def _score_live_pose_sequence(
             "alignment_path_length": 0,
             "hint_count": 0,
             "hints": [],
+            "phase_scores": [],
+            "substage_scores": [],
+            "part_scores": [],
+            "pose_quality": {
+                "reference": ref_data.get("pose_quality", {}),
+                "query": pose_quality_summary(
+                    np.asarray(point_confidence_seq or [], dtype=np.float32),
+                    processed_frames=int(processed_frames or len(points_seq)),
+                    skipped_frames=int(skipped_frames),
+                ),
+            },
         }
 
+    max_final_score_frames = 600
+    score_stride = max(1, int(final_score_stride))
+    if len(points_seq) > max_final_score_frames:
+        score_stride = max(score_stride, int(np.ceil(len(points_seq) / max_final_score_frames)))
+    if score_stride > 1:
+        sample_idx = np.arange(0, len(points_seq), score_stride, dtype=np.int32)
+        if sample_idx[-1] != len(points_seq) - 1:
+            sample_idx = np.append(sample_idx, len(points_seq) - 1)
+        points_seq = [points_seq[int(idx)] for idx in sample_idx]
+        raw_points_seq = [raw_points_seq[int(idx)] for idx in sample_idx]
+        frame_indices = [frame_indices[int(idx)] for idx in sample_idx]
+        time_s = [time_s[int(idx)] for idx in sample_idx]
+        if point_confidence_seq and len(point_confidence_seq) >= int(sample_idx[-1]) + 1:
+            point_confidence_seq = [point_confidence_seq[int(idx)] for idx in sample_idx]
+
+    points = np.asarray(points_seq, dtype=np.float32)
+    if point_confidence_seq and len(point_confidence_seq) == len(points_seq):
+        point_confidence = np.asarray(point_confidence_seq, dtype=np.float32)
+    else:
+        point_confidence = np.ones((points.shape[0], 33), dtype=np.float32)
     qry_data: Dict[str, Any] = {
-        "points": np.asarray(points_seq, dtype=np.float32),
+        "points": points,
         "raw_points": np.asarray(raw_points_seq, dtype=np.float32),
+        "point_confidence": point_confidence,
         "frame_indices": np.asarray(frame_indices, dtype=np.int32),
         "time_s": np.asarray(time_s, dtype=np.float32),
         "fps": float(fps),
         "frame_stride": 1,
+        "final_score_stride": int(score_stride),
+        "pose_quality": pose_quality_summary(
+            point_confidence,
+            processed_frames=int(processed_frames or len(points_seq)),
+            skipped_frames=int(skipped_frames),
+        ),
     }
-    feature_bundle = build_pose_feature_bundle(qry_data["points"])
+    feature_bundle = build_pose_feature_bundle(qry_data["points"], point_confidence=qry_data["point_confidence"])
     qry_data["angle_features"] = feature_bundle["angle_features"]
     qry_data["combined_features_raw"] = feature_bundle["combined_features_raw"]
+    qry_data["feature_confidence_weights"] = feature_bundle["feature_confidence_weights"]
     qry_data = _apply_template_feature_stats(qry_data, ref_data)
     qry_data = _ensure_baduanjin_features(qry_data)
 
-    dist, path = dtw_distance_multidim(ref_data["features"], qry_data["features"])
+    dist, path = dtw_distance_multidim(
+        ref_data["features"],
+        qry_data["features"],
+        a_weights=ref_data.get("feature_confidence_weights"),
+        b_weights=qry_data.get("feature_confidence_weights"),
+    )
     norm_dist = dist / max(1, len(path))
-    score = distance_to_score(norm_dist, score_scale)
+    global_dtw_score = distance_to_score(norm_dist, score_scale)
     hints, _ = build_feedback(
         path=path,
         ref_points=ref_data["points"],
@@ -662,16 +1109,33 @@ def _score_live_pose_sequence(
         hint["query_frame"] = int(qry_data["frame_indices"][q_idx])
         hint["query_time_s"] = float(qry_data["time_s"][q_idx])
         hint["ref_time_s"] = float(ref_data["time_s"][int(hint["ref_index"])])
+    phase_scores, substage_scores, part_scores = build_score_breakdowns(
+        path=path,
+        ref_data=ref_data,
+        qry_data=qry_data,
+        score_scale=score_scale,
+        hint_threshold=hint_threshold,
+    )
+    score = _weighted_phase_score(phase_scores, fallback=global_dtw_score)
 
     return {
         "matched_frames": int(qry_data["features"].shape[0]),
         "avg_score_0_100": float(score),
         "score_0_100": float(score),
+        "global_dtw_score_0_100": float(global_dtw_score),
+        "score_method": "phase_local_dtw_weighted_average",
         "normalized_dtw_distance": float(norm_dist),
         "dtw_distance": float(dist),
         "alignment_path_length": int(len(path)),
         "hint_count": int(len(hints)),
         "hints": hints,
+        "phase_scores": phase_scores,
+        "substage_scores": substage_scores,
+        "part_scores": part_scores,
+        "pose_quality": {
+            "reference": ref_data.get("pose_quality", {}),
+            "query": qry_data.get("pose_quality", {}),
+        },
     }
 
 
@@ -700,6 +1164,8 @@ def run_camera_coach(
     stop_checker: Optional[Callable[[], bool]] = None,
     frame_callback: Optional[Callable[[np.ndarray], None]] = None,
     state_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    realtime_playback: bool = True,
+    final_score_stride: int = 1,
 ) -> Dict[str, Any]:
     """运行实时跟练主循环。
 
@@ -729,8 +1195,12 @@ def run_camera_coach(
     if camera_height:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(camera_height))
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0 or fps > 120:
+    raw_fps = cap.get(cv2.CAP_PROP_FPS)
+    try:
+        fps = float(raw_fps)
+    except (TypeError, ValueError):
+        fps = 30.0
+    if not np.isfinite(fps) or fps <= 0 or fps > 120:
         fps = 30.0
     total_capture_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
@@ -762,10 +1232,12 @@ def run_camera_coach(
     error_frames: list[dict[str, Any]] = []
     query_points_seq: list[np.ndarray] = []
     query_raw_points_seq: list[np.ndarray] = []
+    query_point_confidence_seq: list[np.ndarray] = []
     query_frame_indices: list[int] = []
     query_time_s: list[float] = []
     saved_error_keys: set[str] = set()
     processed_idx = 0
+    invalid_pose_frames = 0
     last_hint_processed_idx = -10**9
     latest_phase_name = ""
     latest_phase_cue = ""
@@ -777,16 +1249,18 @@ def run_camera_coach(
     ref_times = np.asarray(ref_data.get("time_s"), dtype=np.float32)
     ref_length = int(ref_data["features"].shape[0])
     session_start_time = time.perf_counter()
-    use_video_timeline = _is_video_file_source(camera_source)
+    use_video_timeline = bool(realtime_playback and _is_video_file_source(camera_source))
     use_async_live_stream = True
-    preview_update_stride = 2
-    preview_min_interval_s = 0.18
-    state_update_interval_s = 0.25
+    live_score_stride = 3
+    preview_update_stride = 1
+    preview_min_interval_s = 0.12
+    state_update_interval_s = 0.50
     last_preview_push_at = -1.0
     last_state_push_at = -1.0
     preview_sent_count = 0
     state_sent_count = 0
     skipped_capture_frames = 0
+    last_timestamp_ms = -1
 
     detector_context = (
         LiveStreamPoseDetector(task_model=live_task_model, num_poses=ref_data["num_poses"])
@@ -833,10 +1307,13 @@ def run_camera_coach(
             query_view = frame.copy()
             query_overlay_view: Optional[np.ndarray] = None
             current_frame_idx = int(frame_idx)
-            current_time_s = float(frame_idx / fps)
+            current_time_s = float(frame_idx / fps) if use_video_timeline else max(0.0, time.perf_counter() - session_start_time)
             if use_async_live_stream:
                 # 异步模式下持续提交新帧，只消费最近一次完成的推理结果。
                 timestamp_ms = int(round(current_time_s * 1000.0))
+                if timestamp_ms <= last_timestamp_ms:
+                    timestamp_ms = last_timestamp_ms + 1
+                last_timestamp_ms = timestamp_ms
                 landmarker.submit_frame(
                     frame=frame,
                     timestamp_ms=timestamp_ms,
@@ -845,6 +1322,52 @@ def run_camera_coach(
                 )
                 latest_result = landmarker.pop_latest_result()
                 if latest_result is None:
+                    wall_elapsed_s = max(time.perf_counter() - session_start_time, 1e-6)
+                    completed_frames = processed_idx + 1
+                    if frame_callback is not None and (
+                        preview_sent_count == 0
+                        or (
+                            completed_frames % preview_update_stride == 0
+                            and (wall_elapsed_s - last_preview_push_at) >= preview_min_interval_s
+                        )
+                    ):
+                        preview_sent_count += 1
+                        last_preview_push_at = wall_elapsed_s
+                        frame_callback(query_view)
+                    if state_callback is not None and (
+                        state_sent_count == 0 or (wall_elapsed_s - last_state_push_at) >= state_update_interval_s
+                    ):
+                        state_sent_count += 1
+                        last_state_push_at = wall_elapsed_s
+                        state_callback(
+                            {
+                                "query_frame": int(current_frame_idx),
+                                "query_time_s": float(current_time_s),
+                                "ref_frame": int(ref_data["frame_indices"][current_ref_seq_idx]) if ref_length else 0,
+                                "ref_time_s": float(ref_data["time_s"][current_ref_seq_idx]) if ref_times.size else 0.0,
+                                "phase_name": latest_phase_name,
+                                "phase_cue": latest_phase_cue,
+                                "substage_key": latest_substage_key,
+                                "substage_name": latest_substage_name,
+                                "substage_cue": latest_substage_cue,
+                                "part": "pose",
+                                "message": "正在识别人体姿态，请保持全身入镜。",
+                                "local_error": latest_local_err,
+                                "confidence": {
+                                    "mean": 0.0,
+                                    "min": 0.0,
+                                    "valid_points": 0,
+                                    "total_points": 33,
+                                },
+                                "perf": {
+                                    "processed_fps": float(completed_frames / wall_elapsed_s),
+                                    "preview_fps": float(preview_sent_count / wall_elapsed_s),
+                                    "state_fps": float(state_sent_count / wall_elapsed_s),
+                                    "timeline_lag_ms": 0.0,
+                                    "skipped_frames": int(skipped_capture_frames),
+                                },
+                            }
+                        )
                     frame_idx += 1
                     continue
                 query_view = latest_result["frame"]
@@ -852,16 +1375,72 @@ def run_camera_coach(
                 current_time_s = float(latest_result["frame_time_s"])
                 norm_pts = latest_result["norm_pts"]
                 raw_pts = latest_result["raw_pts"]
+                point_confidence = latest_result["point_confidence"]
             else:
                 timestamp_ms = int((frame_idx * 1000.0) / fps)
-                norm_pts, raw_pts, prev_center = detect_pose_in_frame(
+                if timestamp_ms <= last_timestamp_ms:
+                    timestamp_ms = last_timestamp_ms + 1
+                last_timestamp_ms = timestamp_ms
+                norm_pts, raw_pts, point_confidence, prev_center = detect_pose_in_frame(
                     landmarker=landmarker,
                     frame=frame,
                     timestamp_ms=timestamp_ms,
                     prev_center=prev_center,
                 )
 
-            if raw_pts is not None and norm_pts is not None:
+            if raw_pts is None or norm_pts is None or point_confidence is None:
+                invalid_pose_frames += 1
+                completed_frames = processed_idx + 1
+                wall_elapsed_s = max(time.perf_counter() - session_start_time, 1e-6)
+                no_pose_message = "未检测到完整人体姿态，请站在画面中央，并保持全身入镜。"
+                if state_callback is not None and (
+                    state_sent_count == 0 or (wall_elapsed_s - last_state_push_at) >= state_update_interval_s
+                ):
+                    state_sent_count += 1
+                    last_state_push_at = wall_elapsed_s
+                    state_callback(
+                        {
+                            "query_frame": int(current_frame_idx),
+                            "query_time_s": float(current_time_s),
+                            "ref_frame": int(ref_data["frame_indices"][current_ref_seq_idx]) if ref_length else 0,
+                            "ref_time_s": float(ref_data["time_s"][current_ref_seq_idx]) if ref_times.size else 0.0,
+                            "phase_name": latest_phase_name,
+                            "phase_cue": latest_phase_cue,
+                            "substage_key": latest_substage_key,
+                            "substage_name": latest_substage_name,
+                            "substage_cue": latest_substage_cue,
+                            "part": "pose",
+                            "message": no_pose_message,
+                            "local_error": latest_local_err,
+                            "confidence": {
+                                "mean": 0.0,
+                                "min": 0.0,
+                                "valid_points": 0,
+                                "total_points": 33,
+                            },
+                            "perf": {
+                                "processed_fps": float(completed_frames / wall_elapsed_s),
+                                "preview_fps": float(preview_sent_count / wall_elapsed_s),
+                                "state_fps": float(state_sent_count / wall_elapsed_s),
+                                "timeline_lag_ms": 0.0,
+                                "skipped_frames": int(skipped_capture_frames),
+                            },
+                        }
+                    )
+                if frame_callback is not None and (
+                    preview_sent_count == 0
+                    or (
+                        completed_frames % preview_update_stride == 0
+                        and (wall_elapsed_s - last_preview_push_at) >= preview_min_interval_s
+                    )
+                ):
+                    preview_sent_count += 1
+                    last_preview_push_at = wall_elapsed_s
+                    frame_callback(query_view)
+                frame_idx += 1
+                continue
+
+            if raw_pts is not None and norm_pts is not None and point_confidence is not None:
                 accepted_hint: Optional[dict[str, Any]] = None
                 pose_window.append(norm_pts)
                 current_points, _, current_feature, current_angles = build_current_feature(
@@ -872,92 +1451,108 @@ def run_camera_coach(
                 )
                 query_points_seq.append(current_points.copy())
                 query_raw_points_seq.append(raw_pts.copy())
+                query_point_confidence_seq.append(point_confidence.copy())
                 query_frame_indices.append(int(current_frame_idx))
                 query_time_s.append(float(current_time_s))
 
-                elapsed_s = current_time_s if use_video_timeline else time.perf_counter() - session_start_time
-                if ref_times.size:
-                    target_time_s = min(float(elapsed_s), float(ref_times[-1]))
-                    target_ref_seq_idx = int(np.searchsorted(ref_times, target_time_s, side="left"))
-                    target_ref_seq_idx = int(np.clip(target_ref_seq_idx, 0, ref_length - 1))
-                else:
-                    target_ref_seq_idx = min(current_ref_seq_idx + 1, ref_length - 1)
-                    target_time_s = float(target_ref_seq_idx)
+                should_score_frame = (
+                    processed_idx == 0
+                    or processed_idx % live_score_stride == 0
+                    or not latest_phase_name
+                    or active_hint_left <= 0
+                )
+                if should_score_frame:
+                    elapsed_s = current_time_s if use_video_timeline else time.perf_counter() - session_start_time
+                    if ref_times.size:
+                        target_time_s = min(float(elapsed_s), float(ref_times[-1]))
+                        target_ref_seq_idx = int(np.searchsorted(ref_times, target_time_s, side="left"))
+                        target_ref_seq_idx = int(np.clip(target_ref_seq_idx, 0, ref_length - 1))
+                    else:
+                        target_ref_seq_idx = min(current_ref_seq_idx + 1, ref_length - 1)
+                        target_time_s = float(target_ref_seq_idx)
 
-                search_radius = max(3, int(ref_search_window))
-                search_start = max(0, target_ref_seq_idx - search_radius)
-                search_end = min(ref_length, target_ref_seq_idx + search_radius + 1)
-                best_ref_idx = target_ref_seq_idx
-                best_dist = float("inf")
-                for ref_idx in range(search_start, search_end):
-                    weighted_feature = weight_single_feature(
-                        current_feature,
-                        int(ref_data["phase_ids"][ref_idx]),
+                    search_radius = max(3, int(ref_search_window))
+                    search_start = max(0, target_ref_seq_idx - search_radius)
+                    search_end = min(ref_length, target_ref_seq_idx + search_radius + 1)
+                    candidate_features = ref_data["features"][search_start:search_end]
+                    candidate_phase_ids = np.asarray(ref_data["phase_ids"][search_start:search_end], dtype=np.int32)
+                    if candidate_features.size:
+                        candidate_dists = np.empty(candidate_features.shape[0], dtype=np.float32)
+                        weighted_current_cache: dict[int, np.ndarray] = {}
+                        for phase_id in np.unique(candidate_phase_ids):
+                            phase_int = int(phase_id)
+                            weighted_current = weighted_current_cache.get(phase_int)
+                            if weighted_current is None:
+                                weighted_current = weight_single_feature(
+                                    current_feature,
+                                    phase_int,
+                                    rule_config=ref_data.get("rule_config"),
+                                )
+                                weighted_current_cache[phase_int] = weighted_current
+                            mask = candidate_phase_ids == phase_int
+                            candidate_dists[mask] = np.linalg.norm(candidate_features[mask] - weighted_current, axis=1)
+                        current_ref_seq_idx = int(search_start + int(np.argmin(candidate_dists)))
+                    else:
+                        current_ref_seq_idx = int(target_ref_seq_idx)
+
+                    target_phase_id = int(ref_data["phase_ids"][current_ref_seq_idx])
+                    phase = get_phase_definition(target_phase_id, rule_config=ref_data.get("rule_config"))
+                    if ref_data.get("substage_keys") is not None and len(ref_data["substage_keys"]) > current_ref_seq_idx:
+                        substage_key = str(ref_data["substage_keys"][current_ref_seq_idx])
+                        substage = get_substage_by_key(target_phase_id, substage_key)
+                        if substage is None:
+                            substage = get_substage_definition(target_phase_id, 0.0)
+                    else:
+                        phase_times = ref_times[ref_data["phase_ids"] == target_phase_id] if ref_times.size else np.asarray([], dtype=np.float32)
+                        if phase_times.size:
+                            phase_start_s = float(phase_times[0])
+                            phase_end_s = float(phase_times[-1])
+                            phase_progress = (float(target_time_s) - phase_start_s) / max(1e-6, phase_end_s - phase_start_s)
+                        else:
+                            phase_progress = 0.0
+                        substage = get_substage_definition(target_phase_id, phase_progress)
+                    latest_phase_name = f"{phase.display_name} - {substage.name}"
+                    latest_phase_cue = substage.cue
+                    latest_substage_key = substage.key
+                    latest_substage_name = substage.name
+                    latest_substage_cue = substage.cue
+                    latest_local_err = float(
+                        np.mean(np.linalg.norm(current_points - ref_data["points"][current_ref_seq_idx], axis=1))
+                    )
+                    active_hint, _, latest_part = build_live_feedback(
+                        ref_points=ref_data["points"][current_ref_seq_idx],
+                        qry_points=current_points,
+                        hint_threshold=hint_threshold,
+                        phase_id=target_phase_id,
+                        substage_key=latest_substage_key,
+                        ref_angles=ref_data["angle_features"][current_ref_seq_idx],
+                        qry_angles=current_angles,
                         rule_config=ref_data.get("rule_config"),
                     )
-                    dist = float(np.linalg.norm(weighted_feature - ref_data["features"][ref_idx]))
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_ref_idx = ref_idx
-
-                current_ref_seq_idx = best_ref_idx
-                target_phase_id = int(ref_data["phase_ids"][current_ref_seq_idx])
-                phase = get_phase_definition(target_phase_id, rule_config=ref_data.get("rule_config"))
-                if ref_data.get("substage_keys") is not None and len(ref_data["substage_keys"]) > current_ref_seq_idx:
-                    substage_key = str(ref_data["substage_keys"][current_ref_seq_idx])
-                    substage = get_substage_by_key(target_phase_id, substage_key)
-                    if substage is None:
-                        substage = get_substage_definition(target_phase_id, 0.0)
-                else:
-                    phase_times = ref_times[ref_data["phase_ids"] == target_phase_id] if ref_times.size else np.asarray([], dtype=np.float32)
-                    if phase_times.size:
-                        phase_start_s = float(phase_times[0])
-                        phase_end_s = float(phase_times[-1])
-                        phase_progress = (float(target_time_s) - phase_start_s) / max(1e-6, phase_end_s - phase_start_s)
-                    else:
-                        phase_progress = 0.0
-                    substage = get_substage_definition(target_phase_id, phase_progress)
-                latest_phase_name = f"{phase.display_name} - {substage.name}"
-                latest_phase_cue = substage.cue
-                latest_substage_key = substage.key
-                latest_substage_name = substage.name
-                latest_substage_cue = substage.cue
-                latest_local_err = float(
-                    np.mean(np.linalg.norm(current_points - ref_data["points"][current_ref_seq_idx], axis=1))
-                )
-                active_hint, _, latest_part = build_live_feedback(
-                    ref_points=ref_data["points"][current_ref_seq_idx],
-                    qry_points=current_points,
-                    hint_threshold=hint_threshold,
-                    phase_id=target_phase_id,
-                    substage_key=latest_substage_key,
-                    ref_angles=ref_data["angle_features"][current_ref_seq_idx],
-                    qry_angles=current_angles,
-                    rule_config=ref_data.get("rule_config"),
-                )
-                active_hint_left = keep_frames if active_hint else max(0, active_hint_left - 1)
-                if (
-                    active_hint
-                    and len(live_hints) < int(max_hints)
-                    and (processed_idx - last_hint_processed_idx) >= int(hint_min_interval)
-                ):
-                    accepted_hint = {
-                        "query_frame": int(current_frame_idx),
-                        "query_time_s": float(current_time_s),
-                        "phase_name": latest_phase_name,
-                        "cue": latest_phase_cue,
-                        "substage_key": latest_substage_key,
-                        "substage_name": latest_substage_name,
-                        "substage_cue": latest_substage_cue,
-                        "part": latest_part,
-                        "message": active_hint,
-                        "local_error": float(latest_local_err),
-                        "ref_frame": int(ref_data["frame_indices"][current_ref_seq_idx]),
-                        "ref_time_s": float(ref_data["time_s"][current_ref_seq_idx]) if ref_times.size else 0.0,
-                    }
-                    live_hints.append(accepted_hint)
-                    last_hint_processed_idx = processed_idx
+                    active_hint_left = keep_frames if active_hint else max(0, active_hint_left - live_score_stride)
+                    if (
+                        active_hint
+                        and len(live_hints) < int(max_hints)
+                        and (processed_idx - last_hint_processed_idx) >= int(hint_min_interval)
+                    ):
+                        accepted_hint = {
+                            "query_frame": int(current_frame_idx),
+                            "query_time_s": float(current_time_s),
+                            "phase_name": latest_phase_name,
+                            "cue": latest_phase_cue,
+                            "substage_key": latest_substage_key,
+                            "substage_name": latest_substage_name,
+                            "substage_cue": latest_substage_cue,
+                            "part": latest_part,
+                            "message": active_hint,
+                            "local_error": float(latest_local_err),
+                            "ref_frame": int(ref_data["frame_indices"][current_ref_seq_idx]),
+                            "ref_time_s": float(ref_data["time_s"][current_ref_seq_idx]) if ref_times.size else 0.0,
+                        }
+                        live_hints.append(accepted_hint)
+                        last_hint_processed_idx = processed_idx
             else:
+                invalid_pose_frames += 1
                 accepted_hint = None
                 draw_text_block(
                     query_view,
@@ -978,7 +1573,13 @@ def run_camera_coach(
                     ref_view = np.zeros_like(query_view)
                 else:
                     ref_view = current_ref_frame.copy()
-                    draw_pose_skeleton(ref_view, ref_data["raw_points"][current_ref_seq_idx])
+                    ref_confidence = (
+                        ref_data["point_confidence"][current_ref_seq_idx]
+                        if ref_data.get("point_confidence") is not None
+                        and len(ref_data["point_confidence"]) > current_ref_seq_idx
+                        else None
+                    )
+                    draw_pose_skeleton(ref_view, ref_data["raw_points"][current_ref_seq_idx], ref_confidence)
             else:
                 ref_view = np.zeros_like(query_view)
 
@@ -995,7 +1596,7 @@ def run_camera_coach(
                 if query_overlay_view is None:
                     query_overlay_view = query_view.copy()
                     if raw_pts is not None:
-                        draw_pose_skeleton(query_overlay_view, raw_pts)
+                        draw_pose_skeleton(query_overlay_view, raw_pts, point_confidence)
                 error_frame = compose_error_frame(
                     ref_frame=ref_view,
                     qry_frame=query_overlay_view,
@@ -1052,6 +1653,12 @@ def run_camera_coach(
                         "part": latest_part,
                         "message": hint_text,
                         "local_error": latest_local_err,
+                        "confidence": {
+                            "mean": float(np.mean(point_confidence)),
+                            "min": float(np.min(point_confidence)),
+                            "valid_points": int(np.sum(point_confidence >= 0.40)),
+                            "total_points": int(point_confidence.shape[0]),
+                        },
                         "perf": {
                             "processed_fps": float(completed_frames / wall_elapsed_s),
                             "preview_fps": float(preview_sent_count / wall_elapsed_s),
@@ -1074,7 +1681,7 @@ def run_camera_coach(
                 if query_overlay_view is None:
                     query_overlay_view = query_view.copy()
                     if raw_pts is not None:
-                        draw_pose_skeleton(query_overlay_view, raw_pts)
+                        draw_pose_skeleton(query_overlay_view, raw_pts, point_confidence)
                 live_preview_frame = compose_live_query_frame(
                     qry_frame=query_overlay_view,
                     score=0.0,
@@ -1082,6 +1689,7 @@ def run_camera_coach(
                     active_hint=hint_text,
                     phase_name=latest_phase_name,
                     phase_cue=latest_phase_cue,
+                    confidence=point_confidence,
                 )
                 preview_sent_count += 1
                 last_preview_push_at = wall_elapsed_s
@@ -1092,7 +1700,7 @@ def run_camera_coach(
                 if query_overlay_view is None:
                     query_overlay_view = query_view.copy()
                     if raw_pts is not None:
-                        draw_pose_skeleton(query_overlay_view, raw_pts)
+                        draw_pose_skeleton(query_overlay_view, raw_pts, point_confidence)
                 output_frame = compose_compare_frame(
                     ref_frame=ref_view,
                     qry_frame=query_overlay_view,
@@ -1109,6 +1717,13 @@ def run_camera_coach(
                     },
                     phase_name=latest_phase_name,
                     phase_cue=latest_phase_cue,
+                    ref_confidence=(
+                        ref_data["point_confidence"][current_ref_seq_idx]
+                        if ref_data.get("point_confidence") is not None
+                        and len(ref_data["point_confidence"]) > current_ref_seq_idx
+                        else None
+                    ),
+                    qry_confidence=point_confidence,
                     max_panel_height=480,
                 )
                 if output_frame.shape[1] % 2 != 0:
@@ -1211,6 +1826,7 @@ def run_camera_coach(
         ref_data=ref_data,
         points_seq=query_points_seq,
         raw_points_seq=query_raw_points_seq,
+        point_confidence_seq=query_point_confidence_seq,
         frame_indices=query_frame_indices,
         time_s=query_time_s,
         fps=fps,
@@ -1218,6 +1834,9 @@ def run_camera_coach(
         hint_threshold=hint_threshold,
         hint_min_interval=hint_min_interval,
         max_hints=max_hints,
+        processed_frames=processed_idx,
+        skipped_frames=invalid_pose_frames,
+        final_score_stride=final_score_stride,
     )
     final_hints = global_score["hints"] or live_hints
     summary = {
@@ -1225,8 +1844,12 @@ def run_camera_coach(
         "reference_video": ref_video_path,
         "camera_source": str(camera_source),
         "matched_frames": int(global_score["matched_frames"]),
+        "collected_frames": int(len(query_points_seq)),
+        "final_score_stride": int(max(1, final_score_stride)),
         "avg_score_0_100": float(global_score["avg_score_0_100"]),
         "score_0_100": float(global_score["score_0_100"]),
+        "global_dtw_score_0_100": float(global_score.get("global_dtw_score_0_100", global_score["score_0_100"])),
+        "score_method": str(global_score.get("score_method", "")),
         "normalized_dtw_distance": float(global_score["normalized_dtw_distance"]),
         "dtw_distance": float(global_score["dtw_distance"]),
         "alignment_path_length": int(global_score["alignment_path_length"]),
@@ -1241,6 +1864,10 @@ def run_camera_coach(
         "live_hints": live_hints,
         "error_frame_count": int(len(error_frames)),
         "error_frames": error_frames,
+        "phase_scores": global_score.get("phase_scores", []),
+        "substage_scores": global_score.get("substage_scores", []),
+        "part_scores": global_score.get("part_scores", []),
+        "pose_quality": global_score.get("pose_quality", {}),
         "template_path": template_path,
         "output_video": actual_out_video,
         "perf": final_perf,

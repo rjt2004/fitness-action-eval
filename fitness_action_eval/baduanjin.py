@@ -205,7 +205,7 @@ BADUANJIN_PHASES: List[BaduanjinPhase] = [
         display_name="两手攀足固肾腰",
         cue="折髋前俯，双手下探，腰背徐徐放松。",
         duration_weight=19.0,
-        point_importance={"hands": 1.7, "waist": 1.8, "torso": 1.5, "knees": 1.2},
+        point_importance={"hands": 1.1, "waist": 1.9, "torso": 1.6, "knees": 1.3},
         angle_importance={"left_hip": 1.8, "right_hip": 1.8, "left_knee": 1.3, "right_knee": 1.3},
         feedback_priority=("waist", "hands", "torso", "knees"),
         hint_templates={
@@ -331,9 +331,9 @@ BADUANJIN_MANUAL_BOUNDARIES_S: List[tuple[float, float]] = [
     (143.0, 230.0),
     (230.0, 305.0),
     (305.0, 375.0),
-    (375.0, 475.0),
-    (475.0, 600.0),
-    (600.0, 660.0),
+    (375.0, 465.0),
+    (465.0, 598.0),
+    (598.0, 660.0),
     (660.0, 710.0),
     (710.0, 732.0),
 ]

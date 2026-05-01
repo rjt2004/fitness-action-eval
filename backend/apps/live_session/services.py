@@ -4,6 +4,7 @@ import json
 import shutil
 import threading
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -173,6 +174,7 @@ def _run_live_session_worker(session_id: int, stop_event: threading.Event) -> No
             stop_checker=stop_event.is_set,
             frame_callback=lambda frame: _update_preview_frame(session_id, frame),
             state_callback=lambda state: _update_runtime_state(session_id, state),
+            final_score_stride=max(3, int(session.frame_stride or 1) * 3),
         )
         summary["summary_json_path"] = summary_path
         summary["output_video"] = ""
@@ -187,7 +189,7 @@ def _run_live_session_worker(session_id: int, stop_event: threading.Event) -> No
     except Exception as exc:
         session = LiveSession.objects.get(id=session_id)
         session.status = LiveSession.Status.FAILED
-        session.error_message = str(exc)
+        session.error_message = traceback.format_exc()
         session.ended_at = datetime.now()
         session.save(update_fields=["status", "error_message", "ended_at", "updated_at"])
     finally:

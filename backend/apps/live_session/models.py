@@ -53,7 +53,7 @@ class LiveSession(models.Model):
     hint_threshold = models.DecimalField(max_digits=6, decimal_places=3, default=0.200, verbose_name="提示阈值")
     hint_min_interval = models.PositiveIntegerField(default=60, verbose_name="提示最小间隔")
     max_hints = models.PositiveIntegerField(default=360, verbose_name="提示上限")
-    ref_search_window = models.PositiveIntegerField(default=60, verbose_name="模板搜索窗口")
+    ref_search_window = models.PositiveIntegerField(default=12, verbose_name="模板搜索窗口")
 
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, verbose_name="状态")
     summary_json_path = models.CharField(max_length=255, blank=True, default="", verbose_name="摘要 JSON 路径")

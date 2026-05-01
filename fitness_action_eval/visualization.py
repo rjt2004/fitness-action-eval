@@ -123,9 +123,56 @@ def measure_text(text: str, font_size: int) -> Tuple[int, int]:
     return right - left, bottom - top
 
 
-def draw_pose_skeleton(frame: np.ndarray, points_xy: np.ndarray) -> None:
+def confidence_to_bgr(confidence: float) -> Tuple[int, int, int]:
+    value = float(np.clip(confidence, 0.0, 1.0))
+    if value >= 0.75:
+        return (80, 255, 120)
+    if value >= 0.40:
+        return (0, 220, 255)
+    return (70, 80, 255)
+
+
+def mean_confidence_text(confidence: Optional[np.ndarray]) -> str:
+    if confidence is None or confidence.size == 0:
+        return "--"
+    return f"{float(np.mean(confidence)):.2f}"
+
+
+def draw_confidence_legend(frame: np.ndarray, x: int = 20, y: Optional[int] = None) -> None:
+    labels = [
+        ("高", (80, 255, 120)),
+        ("中", (0, 220, 255)),
+        ("低", (70, 80, 255)),
+    ]
+    font_size = 18
+    line_h = 26
+    pad = 8
+    title = "关键点置信度"
+    panel_w = 178
+    panel_h = pad * 2 + line_h * 2
+    if y is None:
+        y = max(12, frame.shape[0] - panel_h - 14)
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x, y), (x + panel_w, y + panel_h), (20, 20, 20), -1)
+    cv2.addWeighted(overlay, 0.62, frame, 0.38, 0.0, frame)
+    draw_utf8_text(frame, title, (x + pad, y + pad - 2), font_size, (245, 245, 245), shadow_color=(0, 0, 0))
+
+    cx = x + pad + 10
+    cy = y + pad + line_h + 8
+    for label, color in labels:
+        cv2.circle(frame, (cx, cy), 6, color, -1, cv2.LINE_AA)
+        draw_utf8_text(frame, label, (cx + 10, cy - 10), font_size, (235, 235, 235), shadow_color=(0, 0, 0))
+        cx += 48
+
+
+def draw_pose_skeleton(frame: np.ndarray, points_xy: np.ndarray, confidence: Optional[np.ndarray] = None) -> None:
     if points_xy.shape != (33, 2):
         return
+    if confidence is not None:
+        confidence = np.asarray(confidence, dtype=np.float32)
+        if confidence.shape != (33,):
+            confidence = None
     height, width = frame.shape[:2]
     pts_px: List[Tuple[int, int]] = []
     for x, y in points_xy:
@@ -135,10 +182,12 @@ def draw_pose_skeleton(frame: np.ndarray, points_xy: np.ndarray) -> None:
 
     for a, b in POSE_CONNECTIONS:
         if a < len(pts_px) and b < len(pts_px):
-            cv2.line(frame, pts_px[a], pts_px[b], (0, 180, 255), 2, cv2.LINE_AA)
+            line_conf = 1.0 if confidence is None else min(float(confidence[a]), float(confidence[b]))
+            cv2.line(frame, pts_px[a], pts_px[b], confidence_to_bgr(line_conf), 2, cv2.LINE_AA)
 
-    for px, py in pts_px:
-        cv2.circle(frame, (px, py), 3, (80, 255, 120), -1, cv2.LINE_AA)
+    for idx, (px, py) in enumerate(pts_px):
+        point_conf = 1.0 if confidence is None else float(confidence[idx])
+        cv2.circle(frame, (px, py), 4, confidence_to_bgr(point_conf), -1, cv2.LINE_AA)
 
 
 def draw_text_block(
@@ -209,6 +258,8 @@ def compose_compare_frame(
     align_info: Optional[Dict[str, int]],
     phase_name: str = "",
     phase_cue: str = "",
+    ref_confidence: Optional[np.ndarray] = None,
+    qry_confidence: Optional[np.ndarray] = None,
     max_panel_height: int = 720,
 ) -> np.ndarray:
     target_height = min(max(ref_frame.shape[0], qry_frame.shape[0]), max_panel_height)
@@ -227,6 +278,8 @@ def compose_compare_frame(
     lines = [f"最终得分：{score:.1f}/100"]
     if np.isfinite(current_local_err):
         lines.append(f"局部偏差：{current_local_err:.3f}")
+    if ref_confidence is not None or qry_confidence is not None:
+        lines.append(f"识别置信度：参考 {mean_confidence_text(ref_confidence)} | 待测 {mean_confidence_text(qry_confidence)}")
     if phase_name:
         lines.append(f"当前动作：{phase_name}")
     if phase_cue:
@@ -240,6 +293,7 @@ def compose_compare_frame(
         lines.append(f"对齐序列：参考 {align_info['ref_seq_idx']} -> 待测 {align_info['qry_seq_idx']}")
         lines.append(f"对齐帧号：参考 {align_info['ref_frame']} -> 待测 {align_info['qry_frame']}")
     draw_text_block(canvas, lines, x=20, y=50)
+    draw_confidence_legend(canvas, x=20)
     return canvas
 
 
@@ -250,6 +304,7 @@ def compose_live_query_frame(
     active_hint: str,
     phase_name: str = "",
     phase_cue: str = "",
+    confidence: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     return qry_frame.copy()
 
@@ -284,6 +339,7 @@ def compose_error_frame(
     if active_hint:
         lines.append(f"纠错提示：{active_hint}")
     draw_text_block(canvas, lines, x=20, y=52)
+    draw_confidence_legend(canvas, x=20)
     return canvas
 
 
@@ -509,7 +565,9 @@ def render_feedback_video(
     frame_hint_map: Dict[int, str],
     frame_error_map: Dict[int, float],
     frame_pose_map: Dict[int, np.ndarray],
+    frame_confidence_map: Optional[Dict[int, np.ndarray]] = None,
     ref_pose_map: Optional[Dict[int, np.ndarray]] = None,
+    ref_confidence_map: Optional[Dict[int, np.ndarray]] = None,
     alignment_map: Optional[Dict[int, Dict[str, int]]] = None,
     frame_phase_map: Optional[Dict[int, str]] = None,
     frame_cue_map: Optional[Dict[int, str]] = None,
@@ -570,7 +628,11 @@ def render_feedback_video(
 
         query_view = query_frame.copy()
         if frame_idx in frame_pose_map:
-            draw_pose_skeleton(query_view, frame_pose_map[frame_idx])
+            draw_pose_skeleton(
+                query_view,
+                frame_pose_map[frame_idx],
+                frame_confidence_map.get(frame_idx) if frame_confidence_map is not None else None,
+            )
 
         if use_compare_mode and alignment_map is not None and frame_idx in alignment_map:
             current_align_info = dict(alignment_map[frame_idx])
@@ -595,7 +657,19 @@ def render_feedback_video(
                 if current_align_info is not None and ref_pose_map is not None:
                     target_ref_frame = current_align_info["ref_frame"]
                     if target_ref_frame in ref_pose_map:
-                        draw_pose_skeleton(ref_view, ref_pose_map[target_ref_frame])
+                        draw_pose_skeleton(
+                            ref_view,
+                            ref_pose_map[target_ref_frame],
+                            ref_confidence_map.get(target_ref_frame) if ref_confidence_map is not None else None,
+                        )
+            ref_confidence = None
+            qry_confidence = None
+            if current_align_info is not None:
+                target_ref_frame = current_align_info["ref_frame"]
+                if ref_confidence_map is not None:
+                    ref_confidence = ref_confidence_map.get(target_ref_frame)
+                if frame_confidence_map is not None:
+                    qry_confidence = frame_confidence_map.get(frame_idx)
             output_frame = compose_compare_frame(
                 ref_frame=ref_view,
                 qry_frame=query_view,
@@ -605,12 +679,16 @@ def render_feedback_video(
                 align_info=current_align_info,
                 phase_name=current_phase_name,
                 phase_cue=current_phase_cue,
+                ref_confidence=ref_confidence,
+                qry_confidence=qry_confidence,
                 max_panel_height=compare_panel_height,
             )
         else:
             lines = [f"最终得分：{score:.1f}/100"]
             if np.isfinite(current_local_err):
                 lines.append(f"局部偏差：{current_local_err:.3f}")
+            if frame_confidence_map is not None and frame_idx in frame_confidence_map:
+                lines.append(f"识别置信度：{mean_confidence_text(frame_confidence_map[frame_idx])}")
             if current_phase_name:
                 lines.append(f"当前动作：{current_phase_name}")
             if current_phase_cue:
@@ -618,6 +696,7 @@ def render_feedback_video(
             if hint_text:
                 lines.append(f"实时提示：{hint_text}")
             draw_text_block(query_view, lines, x=20, y=18)
+            draw_confidence_legend(query_view, x=20)
             output_frame = query_view
 
         if writer is None and output_video:

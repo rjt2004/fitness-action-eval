@@ -30,8 +30,6 @@ onMounted(loadData);
 
 <template>
   <div class="page-shell">
-    <h2 class="page-title">系统概览</h2>
-
     <section class="grid-three">
       <StatCard label="动作模板总数" :value="stats.templates" accent="#0f766e" />
       <StatCard label="离线评估任务" :value="stats.evaluations" accent="#f59e0b" />

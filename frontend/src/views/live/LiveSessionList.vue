@@ -53,8 +53,6 @@ onMounted(loadData);
 
 <template>
   <div class="page-shell">
-    <h2 class="page-title">会话记录</h2>
-
     <section class="soft-card page-panel">
       <el-table v-loading="loading" :data="tableData" stripe style="width: 100%">
         <el-table-column prop="session_no" label="会话编号" min-width="220" />

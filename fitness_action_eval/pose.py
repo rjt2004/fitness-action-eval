@@ -12,8 +12,15 @@ import numpy as np
 from mediapipe.tasks import python as mp_tasks_python
 from mediapipe.tasks.python import vision as mp_tasks_vision
 
-from fitness_action_eval.baduanjin import compute_joint_angle_sequence
+from fitness_action_eval.baduanjin import ANGLE_SPECS, compute_joint_angle_sequence
 from fitness_action_eval.visualization import close_preview_windows, draw_pose_skeleton, draw_text_block, preview_frame
+
+
+MIN_VALID_POINT_CONFIDENCE = 0.20
+MIN_TORSO_CONFIDENCE = 0.25
+MIN_MEAN_CONFIDENCE = 0.20
+CONFIDENCE_WEIGHT_FLOOR = 0.20
+TORSO_LANDMARKS = (11, 12, 23, 24)
 
 
 def moving_average_matrix(x: np.ndarray, k: int) -> np.ndarray:
@@ -42,6 +49,67 @@ def normalize_matrix(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]
     mu = np.mean(x, axis=0, keepdims=True).astype(np.float32)
     std = (np.std(x, axis=0, keepdims=True) + 1e-6).astype(np.float32)
     return ((x - mu) / std).astype(np.float32), mu, std
+
+
+def landmark_confidence(lm) -> float:
+    """Return a stable confidence value for one MediaPipe landmark."""
+
+    values = []
+    for name in ("visibility", "presence"):
+        value = getattr(lm, name, None)
+        if value is not None and np.isfinite(value):
+            values.append(float(value))
+    if not values:
+        return 1.0
+    return float(np.clip(min(values), 0.0, 1.0))
+
+
+def pose_quality_summary(
+    point_confidence: np.ndarray,
+    *,
+    processed_frames: int,
+    skipped_frames: int,
+) -> Dict[str, float | int]:
+    if point_confidence.size == 0:
+        return {
+            "processed_frames": int(processed_frames),
+            "valid_pose_frames": 0,
+            "skipped_frames": int(skipped_frames),
+            "valid_rate": 0.0,
+            "mean_confidence": 0.0,
+            "min_confidence": 0.0,
+            "mean_torso_confidence": 0.0,
+        }
+    torso_conf = point_confidence[:, TORSO_LANDMARKS]
+    return {
+        "processed_frames": int(processed_frames),
+        "valid_pose_frames": int(point_confidence.shape[0]),
+        "skipped_frames": int(skipped_frames),
+        "valid_rate": float(point_confidence.shape[0] / max(1, processed_frames)),
+        "mean_confidence": float(np.mean(point_confidence)),
+        "min_confidence": float(np.min(point_confidence)),
+        "mean_torso_confidence": float(np.mean(torso_conf)),
+    }
+
+
+def build_feature_confidence_weights(point_confidence: Optional[np.ndarray], feature_dim: int = 74) -> np.ndarray:
+    if point_confidence is None:
+        return np.ones((0, feature_dim), dtype=np.float32)
+    if point_confidence.ndim != 2 or point_confidence.shape[1] != 33:
+        raise ValueError("point_confidence expects shape (T, 33).")
+
+    point_weights = np.repeat(point_confidence[:, :, None], 2, axis=2).reshape(point_confidence.shape[0], 66)
+    angle_weights = []
+    for _, a, b, c in ANGLE_SPECS:
+        angle_weights.append(np.mean(point_confidence[:, [a, b, c]], axis=1))
+    angle_weights_arr = np.stack(angle_weights, axis=1).astype(np.float32)
+    weights = np.concatenate([point_weights, angle_weights_arr], axis=1).astype(np.float32)
+    if weights.shape[1] < feature_dim:
+        pad = np.ones((weights.shape[0], feature_dim - weights.shape[1]), dtype=np.float32)
+        weights = np.concatenate([weights, pad], axis=1)
+    elif weights.shape[1] > feature_dim:
+        weights = weights[:, :feature_dim]
+    return np.clip(weights, CONFIDENCE_WEIGHT_FLOOR, 1.0).astype(np.float32)
 
 
 def pose_bbox(
@@ -115,7 +183,7 @@ def _extract_pose_points(
     width: int,
     height: int,
     prev_center: Optional[Tuple[float, float]],
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[Tuple[float, float]]]:
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[Tuple[float, float]]]:
     """把 MediaPipe 原始结果转换成归一化点和原始点。"""
 
     target, prev_center = select_target_pose(
@@ -125,16 +193,25 @@ def _extract_pose_points(
         prev_center=prev_center,
     )
     if target is None or len(target) < 33:
-        return None, None, prev_center
+        return None, None, None, prev_center
 
     pts = np.array([[lm.x, lm.y] for lm in target[:33]], dtype=np.float32)
     if not np.all(np.isfinite(pts)):
-        return None, None, prev_center
+        return None, None, None, prev_center
+
+    confidence = np.asarray([landmark_confidence(lm) for lm in target[:33]], dtype=np.float32)
+    if float(np.max(confidence)) <= 1e-6:
+        confidence = np.ones((33,), dtype=np.float32)
+    enough_visible = int(np.sum(confidence >= MIN_VALID_POINT_CONFIDENCE)) >= 20
+    torso_ok = float(np.mean(confidence[list(TORSO_LANDMARKS)])) >= MIN_TORSO_CONFIDENCE
+    mean_ok = float(np.mean(confidence)) >= MIN_MEAN_CONFIDENCE
+    if not (enough_visible and torso_ok and mean_ok):
+        return None, None, None, prev_center
 
     norm = normalize_pose_points(pts)
     if norm is None or not np.all(np.isfinite(norm)):
-        return None, None, prev_center
-    return norm, pts, prev_center
+        return None, None, None, prev_center
+    return norm, pts, confidence, prev_center
 
 
 def create_pose_landmarker(
@@ -166,7 +243,7 @@ def detect_pose_in_frame(
     frame: np.ndarray,
     timestamp_ms: int,
     prev_center: Optional[Tuple[float, float]],
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[Tuple[float, float]]]:
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[Tuple[float, float]]]:
     """同步检测单帧姿态，主要用于离线视频处理。"""
 
     height, width = frame.shape[:2]
@@ -215,7 +292,7 @@ class LiveStreamPoseDetector:
         if meta is None:
             return
 
-        norm_pts, raw_pts, next_center = _extract_pose_points(
+        norm_pts, raw_pts, point_confidence, next_center = _extract_pose_points(
             result.pose_landmarks,
             width=int(meta["width"]),
             height=int(meta["height"]),
@@ -229,6 +306,7 @@ class LiveStreamPoseDetector:
             "frame": meta["frame"],
             "norm_pts": norm_pts,
             "raw_pts": raw_pts,
+            "point_confidence": point_confidence,
         }
         with self._lock:
             self._prev_center = next_center
@@ -277,13 +355,16 @@ class LiveStreamPoseDetector:
         return latest
 
 
-def build_pose_feature_bundle(points: np.ndarray) -> Dict[str, np.ndarray]:
+def build_pose_feature_bundle(points: np.ndarray, point_confidence: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
     """把骨架点展开成离线评分所需的完整特征包。"""
 
     flat_points = points.reshape(points.shape[0], -1).astype(np.float32)
     angle_features = compute_joint_angle_sequence(points)
     combined_raw = np.concatenate([flat_points, angle_features], axis=1).astype(np.float32)
     base_features, feature_mean, feature_std = normalize_matrix(combined_raw)
+    if point_confidence is None:
+        point_confidence = np.ones((points.shape[0], 33), dtype=np.float32)
+    feature_confidence_weights = build_feature_confidence_weights(point_confidence, feature_dim=combined_raw.shape[1])
     return {
         "flat_points": flat_points,
         "angle_features": angle_features,
@@ -291,6 +372,8 @@ def build_pose_feature_bundle(points: np.ndarray) -> Dict[str, np.ndarray]:
         "base_features": base_features,
         "feature_mean": feature_mean,
         "feature_std": feature_std,
+        "point_confidence": point_confidence.astype(np.float32),
+        "feature_confidence_weights": feature_confidence_weights,
     }
 
 
@@ -349,10 +432,13 @@ def extract_pose_sequence(
 
     points_seq: List[np.ndarray] = []
     raw_points_seq: List[np.ndarray] = []
+    confidence_seq: List[np.ndarray] = []
     frame_indices: List[int] = []
     time_s: List[float] = []
     prev_center = None
     frame_idx = 0
+    processed_frames = 0
+    skipped_frames = 0
     frame_stride = max(1, int(frame_stride))
     progress_start, progress_end = progress_range
     last_reported_progress = -1
@@ -365,20 +451,24 @@ def extract_pose_sequence(
             preview_frame_img = frame.copy()
             should_process = (frame_idx % frame_stride) == 0
             if should_process:
+                processed_frames += 1
                 timestamp_ms = int((frame_idx * 1000.0) / fps)
-                norm_pts, raw_pts, prev_center = detect_pose_in_frame(
+                norm_pts, raw_pts, point_confidence, prev_center = detect_pose_in_frame(
                     landmarker=landmarker,
                     frame=frame,
                     timestamp_ms=timestamp_ms,
                     prev_center=prev_center,
                 )
-                if norm_pts is not None and raw_pts is not None:
+                if norm_pts is not None and raw_pts is not None and point_confidence is not None:
                     points_seq.append(norm_pts)
                     raw_points_seq.append(raw_pts)
+                    confidence_seq.append(point_confidence)
                     frame_indices.append(frame_idx)
                     time_s.append(float(frame_idx / fps))
                     if preview:
                         draw_pose_skeleton(preview_frame_img, raw_pts)
+                else:
+                    skipped_frames += 1
 
             if preview:
                 lines = [
@@ -414,10 +504,11 @@ def extract_pose_sequence(
         progress_callback(progress_end, progress_message)
 
     points = np.asarray(points_seq, dtype=np.float32)
+    point_confidence = np.asarray(confidence_seq, dtype=np.float32)
     flat = points.reshape(points.shape[0], -1)
     flat_smooth = moving_average_matrix(flat, max(1, smooth_window))
     points_smooth = flat_smooth.reshape((-1, 33, 2)).astype(np.float32)
-    feature_bundle = build_pose_feature_bundle(points_smooth)
+    feature_bundle = build_pose_feature_bundle(points_smooth, point_confidence=point_confidence)
 
     return {
         "features": feature_bundle["base_features"],
@@ -427,6 +518,13 @@ def extract_pose_sequence(
         "combined_features_raw": feature_bundle["combined_features_raw"],
         "feature_mean": feature_bundle["feature_mean"],
         "feature_std": feature_bundle["feature_std"],
+        "point_confidence": feature_bundle["point_confidence"],
+        "feature_confidence_weights": feature_bundle["feature_confidence_weights"],
+        "pose_quality": pose_quality_summary(
+            point_confidence,
+            processed_frames=processed_frames,
+            skipped_frames=skipped_frames,
+        ),
         "points": points_smooth,
         "raw_points": np.asarray(raw_points_seq, dtype=np.float32),
         "frame_indices": np.asarray(frame_indices, dtype=np.int32),

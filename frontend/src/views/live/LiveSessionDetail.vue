@@ -33,8 +33,6 @@ onMounted(loadData);
 
 <template>
   <div class="page-shell">
-    <h2 class="page-title">会话详情</h2>
-
     <el-skeleton :loading="loading" animated :rows="10">
       <template #default>
         <section class="soft-card detail-panel">

@@ -161,7 +161,6 @@ onMounted(loadData);
 <template>
   <div class="page-shell">
     <div class="page-head">
-      <h2 class="page-title">用户管理</h2>
       <el-button type="primary" @click="openCreateDialog">新建用户</el-button>
     </div>
 

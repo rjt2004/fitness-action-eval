@@ -34,7 +34,7 @@ class LiveSessionStartSerializer(serializers.Serializer):
     hint_threshold = serializers.DecimalField(max_digits=6, decimal_places=3, required=False, default="0.200")
     hint_min_interval = serializers.IntegerField(required=False, min_value=1, default=60)
     max_hints = serializers.IntegerField(required=False, min_value=1, default=360)
-    ref_search_window = serializers.IntegerField(required=False, min_value=10, default=60)
+    ref_search_window = serializers.IntegerField(required=False, min_value=6, default=12)
 
     def validate_template_id(self, value: int) -> int:
         try:

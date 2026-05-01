@@ -141,8 +141,6 @@ onBeforeUnmount(clearPolling);
 
 <template>
   <div class="page-shell">
-    <h2 class="page-title">模板管理</h2>
-
     <section class="soft-card page-panel">
       <h3 class="section-title">上传并生成标准模板</h3>
       <el-form inline>

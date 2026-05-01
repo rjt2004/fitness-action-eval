@@ -19,6 +19,7 @@ const templateLoading = ref(false);
 const loading = ref(false);
 const currentSession = ref(null);
 const referenceVideoRef = ref(null);
+const practiceAudioRef = ref(null);
 const previewFrameUrl = ref("");
 let timer = null;
 let previewCounter = 0;
@@ -36,7 +37,7 @@ const REALTIME_DEFAULTS = {
   hint_threshold: 0.2,
   hint_min_interval: 60,
   max_hints: 240,
-  ref_search_window: 24,
+  ref_search_window: 12,
 };
 
 const form = reactive({
@@ -47,30 +48,31 @@ const form = reactive({
 });
 
 const runtimeModelOptions = [{ value: "follow_template", label: "跟随模板模型" }];
+const practiceAudioUrl = "/media/template_center/source/八段锦完整版.m4a";
 const sessionActive = computed(() => ["pending", "running"].includes(currentSession.value?.status || ""));
 
 const realtimeInfo = computed(() => {
   const runtime = currentSession.value?.runtime_payload || {};
   const summary = currentSession.value?.summary_payload || {};
   const latestHint = Array.isArray(summary.hints) && summary.hints.length ? summary.hints[summary.hints.length - 1] : {};
-  const finalScore = summary.score_0_100 ?? currentSession.value?.avg_score ?? "";
+  const confidence = runtime.confidence || summary.runtime_state?.confidence || {};
   return {
     phase_name: runtime.phase_name || summary.final_phase_name || currentSession.value?.final_phase_name || "",
     part: runtime.part || latestHint.part || currentSession.value?.final_part || "",
     message: runtime.message || latestHint.message || "",
-    final_score: ["success", "failed", "stopped"].includes(currentSession.value?.status || "") ? finalScore : "",
     local_error: runtime.local_error ?? "",
+    confidence_mean: confidence.mean ?? "",
+    confidence_min: confidence.min ?? "",
+    valid_points: confidence.valid_points ?? "",
+    total_points: confidence.total_points ?? "",
   };
 });
 
-const realtimePerf = computed(() => {
-  const runtimePerf = currentSession.value?.runtime_payload?.perf;
-  if (runtimePerf && typeof runtimePerf === "object") return runtimePerf;
-  const summaryPerf = currentSession.value?.summary_payload?.perf;
-  if (summaryPerf && typeof summaryPerf === "object") return summaryPerf;
-  const runtimeStatePerf = currentSession.value?.summary_payload?.runtime_state?.perf;
-  return runtimeStatePerf && typeof runtimeStatePerf === "object" ? runtimeStatePerf : {};
-});
+const confidenceLegend = [
+  { label: "高", color: "#50ff78", range: ">= 0.75" },
+  { label: "中", color: "#ffdc00", range: "0.40 - 0.75" },
+  { label: "低", color: "#ff5046", range: "< 0.40" },
+];
 
 const realtimeMessage = computed(() => {
   if (!currentSession.value?.id) return "开始跟练后，这里会显示实时纠错提示。";
@@ -96,13 +98,19 @@ function revokePreviewUrl() {
 
 function playReferenceVideo({ restart = false } = {}) {
   const el = referenceVideoRef.value;
+  const audio = practiceAudioRef.value;
   if (!el) return;
-  if (restart) el.currentTime = 0;
+  if (restart) {
+    el.currentTime = 0;
+    if (audio) audio.currentTime = 0;
+  }
   el.play().catch(() => {});
+  audio?.play().catch(() => {});
 }
 
 function pauseReferenceVideo() {
   referenceVideoRef.value?.pause();
+  practiceAudioRef.value?.pause();
 }
 
 function getStoredAccessToken() {
@@ -128,7 +136,11 @@ async function loadTemplates() {
   const data = await getTemplateList();
   templates.value = data.filter((item) => item.status === "ready");
   if (!form.template_id && templates.value.length) {
-    form.template_id = templates.value[0].id;
+    const realtimeTemplate =
+      templates.value.find((item) => item.pose_model === "lite") ||
+      templates.value.find((item) => String(item.template_name || "").toLowerCase().includes("lite")) ||
+      templates.value[0];
+    form.template_id = realtimeTemplate.id;
   }
 }
 
@@ -301,12 +313,11 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="page-shell">
-    <h2 class="page-title">实时跟练</h2>
-
     <div class="content-grid">
       <section class="soft-card page-panel reference-panel">
         <h3 class="section-title">参考视频</h3>
         <div v-loading="templateLoading">
+          <audio ref="practiceAudioRef" :src="practiceAudioUrl" preload="auto" />
           <video
             v-if="selectedTemplate?.source_video_path"
             ref="referenceVideoRef"
@@ -376,7 +387,7 @@ onBeforeUnmount(() => {
                 <el-input-number v-model="form.max_hints" :min="1" :max="9999" />
               </el-form-item>
               <el-form-item label="搜索窗口">
-                <el-input-number v-model="form.ref_search_window" :min="10" :max="120" />
+                <el-input-number v-model="form.ref_search_window" :min="6" :max="120" />
               </el-form-item>
             </div>
           </div>
@@ -409,30 +420,30 @@ onBeforeUnmount(() => {
               <strong>{{ realtimeInfo.part || "--" }}</strong>
             </div>
             <div class="live-coach-field">
-              <span>最终分数</span>
-              <strong>{{ realtimeInfo.final_score !== "" ? Number(realtimeInfo.final_score).toFixed(1) : "--" }}</strong>
-            </div>
-            <div class="live-coach-field">
               <span>局部偏差</span>
               <strong>{{ realtimeInfo.local_error !== "" ? Number(realtimeInfo.local_error).toFixed(3) : "--" }}</strong>
             </div>
+            <div class="live-coach-field">
+              <span>识别置信度</span>
+              <strong>{{ realtimeInfo.confidence_mean !== "" ? Number(realtimeInfo.confidence_mean).toFixed(2) : "--" }}</strong>
+            </div>
+            <div class="live-coach-field">
+              <span>有效关键点</span>
+              <strong>
+                {{
+                  realtimeInfo.valid_points !== "" && realtimeInfo.total_points !== ""
+                    ? `${realtimeInfo.valid_points}/${realtimeInfo.total_points}`
+                    : "--"
+                }}
+              </strong>
+            </div>
           </div>
-          <div class="live-metrics-grid">
-            <div class="live-metric-chip">
-              <span>处理帧率</span>
-              <strong>{{ realtimePerf.processed_fps !== undefined ? Number(realtimePerf.processed_fps).toFixed(1) : "--" }} fps</strong>
-            </div>
-            <div class="live-metric-chip">
-              <span>预览帧率</span>
-              <strong>{{ realtimePerf.preview_fps !== undefined ? Number(realtimePerf.preview_fps).toFixed(1) : "--" }} fps</strong>
-            </div>
-            <div class="live-metric-chip">
-              <span>状态刷新率</span>
-              <strong>{{ realtimePerf.state_fps !== undefined ? Number(realtimePerf.state_fps).toFixed(1) : "--" }} fps</strong>
-            </div>
-            <div class="live-metric-chip">
-              <span>时间线滞后</span>
-              <strong>{{ realtimePerf.timeline_lag_ms !== undefined ? Number(realtimePerf.timeline_lag_ms).toFixed(0) : "--" }} ms</strong>
+          <div class="confidence-legend">
+            <span>骨架颜色</span>
+            <div v-for="item in confidenceLegend" :key="item.label" class="confidence-legend__item">
+              <i :style="{ backgroundColor: item.color }"></i>
+              <strong>{{ item.label }}</strong>
+              <em>{{ item.range }}</em>
             </div>
           </div>
         </div>
@@ -476,11 +487,9 @@ onBeforeUnmount(() => {
 
 .live-coach-card {
   padding: 20px;
-  border: 1px solid rgba(20, 83, 45, 0.14);
+  border: 1px solid rgba(15, 23, 42, 0.1);
   border-radius: 20px;
-  background:
-    radial-gradient(circle at top left, rgba(187, 247, 208, 0.78), transparent 38%),
-    linear-gradient(135deg, #f0fdf4 0%, #f8fafc 100%);
+  background: #ffffff;
 }
 
 .live-coach-card__label {
@@ -505,18 +514,11 @@ onBeforeUnmount(() => {
   margin-top: 18px;
 }
 
-.live-metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 14px;
-}
-
 .live-coach-field {
   min-height: 86px;
   padding: 14px 16px;
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.8);
+  background: #f8fbfa;
   box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.06);
 }
 
@@ -536,34 +538,52 @@ onBeforeUnmount(() => {
   line-height: 1.45;
 }
 
-.live-metric-chip {
+.confidence-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
   padding: 12px 14px;
   border-radius: 14px;
-  background: rgba(240, 249, 255, 0.78);
-  box-shadow: inset 0 0 0 1px rgba(14, 116, 144, 0.08);
+  background: #f8fbfa;
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.06);
 }
 
-.live-metric-chip span {
-  display: block;
-  color: #0f766e;
+.confidence-legend > span {
+  color: #64748b;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 800;
 }
 
-.live-metric-chip strong {
-  display: block;
-  margin-top: 6px;
+.confidence-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: #0f172a;
-  font-size: 18px;
+  font-size: 13px;
+}
+
+.confidence-legend__item i {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.12);
+}
+
+.confidence-legend__item strong {
   font-weight: 800;
-  line-height: 1.35;
+}
+
+.confidence-legend__item em {
+  color: #64748b;
+  font-style: normal;
 }
 
 @media (max-width: 1200px) {
   .content-grid,
   .grid-two,
-  .live-coach-grid,
-  .live-metrics-grid {
+  .live-coach-grid {
     grid-template-columns: 1fr;
   }
 

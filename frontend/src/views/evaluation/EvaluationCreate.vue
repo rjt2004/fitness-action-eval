@@ -117,8 +117,6 @@ onMounted(() => {
 
 <template>
   <div class="page-shell">
-    <h2 class="page-title">离线评估</h2>
-
     <div class="content-grid">
       <section class="soft-card page-panel">
         <h3 class="section-title">参考视频</h3>
