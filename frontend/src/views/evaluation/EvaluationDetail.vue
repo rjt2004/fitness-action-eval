@@ -25,9 +25,7 @@ const phasePlots = computed(() =>
   })),
 );
 const phaseScores = computed(() => detail.value?.result_payload?.phase_scores || []);
-const substageScores = computed(() => detail.value?.result_payload?.substage_scores || []);
 const partScores = computed(() => detail.value?.result_payload?.part_scores || []);
-const poseQuality = computed(() => detail.value?.result_payload?.pose_quality || {});
 
 const isRunning = computed(() => ["pending", "running"].includes(detail.value?.status || ""));
 
@@ -197,52 +195,6 @@ onBeforeUnmount(clearPolling);
         </section>
 
         <section class="soft-card detail-panel" style="margin-top: 20px">
-          <h3 class="section-title">子阶段评分</h3>
-          <div v-if="substageScores.length" class="score-table-wrap">
-            <el-table :data="substageScores" size="small" border>
-              <el-table-column prop="phase_name" label="阶段" min-width="160" />
-              <el-table-column prop="substage_name" label="子阶段" min-width="150" />
-              <el-table-column prop="score_0_100" label="分数" width="100">
-                <template #default="{ row }">{{ Number(row.score_0_100 || 0).toFixed(1) }}</template>
-              </el-table-column>
-              <el-table-column prop="normalized_distance" label="平均距离" width="110">
-                <template #default="{ row }">{{ Number(row.normalized_distance || 0).toFixed(3) }}</template>
-              </el-table-column>
-              <el-table-column prop="reference_mean_confidence" label="标准置信度" width="120">
-                <template #default="{ row }">
-                  {{ row.reference_mean_confidence !== null && row.reference_mean_confidence !== undefined ? Number(row.reference_mean_confidence).toFixed(2) : "--" }}
-                </template>
-              </el-table-column>
-              <el-table-column prop="query_mean_confidence" label="待测置信度" width="120">
-                <template #default="{ row }">
-                  {{ row.query_mean_confidence !== null && row.query_mean_confidence !== undefined ? Number(row.query_mean_confidence).toFixed(2) : "--" }}
-                </template>
-              </el-table-column>
-              <el-table-column prop="alignment_count" label="对齐帧数" width="100" />
-            </el-table>
-          </div>
-          <el-empty v-else description="当前任务暂无子阶段评分" />
-        </section>
-
-        <section class="soft-card detail-panel" style="margin-top: 20px">
-          <h3 class="section-title">姿态识别质量</h3>
-          <div class="quality-grid">
-            <div class="quality-card">
-              <div class="quality-card__title">参考视频</div>
-              <div>有效帧 {{ poseQuality.reference?.valid_pose_frames ?? "--" }}</div>
-              <div>跳过帧 {{ poseQuality.reference?.skipped_frames ?? "--" }}</div>
-              <div>平均置信度 {{ Number(poseQuality.reference?.mean_confidence || 0).toFixed(3) }}</div>
-            </div>
-            <div class="quality-card">
-              <div class="quality-card__title">待测视频</div>
-              <div>有效帧 {{ poseQuality.query?.valid_pose_frames ?? "--" }}</div>
-              <div>跳过帧 {{ poseQuality.query?.skipped_frames ?? "--" }}</div>
-              <div>平均置信度 {{ Number(poseQuality.query?.mean_confidence || 0).toFixed(3) }}</div>
-            </div>
-          </div>
-        </section>
-
-        <section class="soft-card detail-panel" style="margin-top: 20px">
           <h3 class="section-title">纠错提示</h3>
           <div v-if="hints.length" class="hint-scroll">
             <div
@@ -314,8 +266,7 @@ onBeforeUnmount(clearPolling);
 }
 
 .phase-plot-card,
-.part-score-card,
-.quality-card {
+.part-score-card {
   padding: 12px;
   border: 1px solid rgba(15, 23, 42, 0.08);
   border-radius: 16px;
@@ -341,19 +292,13 @@ onBeforeUnmount(clearPolling);
   margin-bottom: 16px;
 }
 
-.part-score-grid,
-.quality-grid {
+.part-score-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
 }
 
-.quality-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.part-score-card__name,
-.quality-card__title {
+.part-score-card__name {
   color: #64748b;
   font-size: 13px;
   line-height: 1.5;
@@ -367,8 +312,7 @@ onBeforeUnmount(clearPolling);
   line-height: 1;
 }
 
-.part-score-card__meta,
-.quality-card {
+.part-score-card__meta {
   color: #64748b;
   line-height: 1.7;
 }
@@ -423,8 +367,7 @@ onBeforeUnmount(clearPolling);
 @media (max-width: 768px) {
   .phase-plot-grid,
   .task-info-grid,
-  .part-score-grid,
-  .quality-grid {
+  .part-score-grid {
     grid-template-columns: 1fr;
   }
 }

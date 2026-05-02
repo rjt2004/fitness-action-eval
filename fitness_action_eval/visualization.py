@@ -575,6 +575,7 @@ def render_feedback_video(
     progress_callback: Optional[Callable[[int, str], None]] = None,
     progress_range: Tuple[int, int] = (72, 92),
     compare_panel_height: int = 540,
+    output_frame_stride: int = 1,
 ) -> None:
     cap = cv2.VideoCapture(query_video)
     if not cap.isOpened():
@@ -596,6 +597,8 @@ def render_feedback_video(
     writer_kind: Optional[str] = None
     if output_video:
         ensure_parent_dir(output_video)
+    output_frame_stride = max(1, int(output_frame_stride))
+    output_fps = fps / output_frame_stride if output_frame_stride > 1 else fps
 
     frame_idx = 0
     active_hint = ""
@@ -615,6 +618,15 @@ def render_feedback_video(
         ok, query_frame = cap.read()
         if not ok:
             break
+
+        should_render_frame = preview or not output_video or frame_idx % output_frame_stride == 0
+        if not should_render_frame:
+            frame_idx += 1
+            if progress_callback and total_frames > 0 and frame_idx % 120 == 0:
+                rendered_ratio = min(1.0, frame_idx / max(1, total_frames))
+                progress = progress_start + int(round(progress_span * rendered_ratio))
+                progress_callback(progress, "正在生成对比视频")
+            continue
 
         if frame_idx in frame_hint_map:
             active_hint = frame_hint_map[frame_idx]
@@ -703,7 +715,7 @@ def render_feedback_video(
             try:
                 writer = imageio.get_writer(
                     output_video,
-                    fps=fps,
+                    fps=output_fps,
                     codec="libx264",
                     pixelformat="yuv420p",
                     macro_block_size=1,
@@ -714,7 +726,7 @@ def render_feedback_video(
                 writer = cv2.VideoWriter(
                     output_video,
                     cv2.VideoWriter_fourcc(*"mp4v"),
-                    fps,
+                    output_fps,
                     (output_frame.shape[1], output_frame.shape[0]),
                 )
                 writer_kind = "cv2"

@@ -5,6 +5,7 @@ from .views import (
     live_session_detail_view,
     live_session_list_view,
     live_session_preview_frame_view,
+    live_session_preview_stream_view,
     live_session_start_view,
     live_session_stop_view,
 )
@@ -16,5 +17,6 @@ urlpatterns = [
     path("sessions/<int:session_id>/", live_session_detail_view, name="live-session-detail"),
     path("sessions/<int:session_id>/delete/", live_session_delete_view, name="live-session-delete"),
     path("sessions/<int:session_id>/preview-frame/", live_session_preview_frame_view, name="live-session-preview-frame"),
+    path("sessions/<int:session_id>/preview-stream/", live_session_preview_stream_view, name="live-session-preview-stream"),
     path("sessions/<int:session_id>/stop/", live_session_stop_view, name="live-session-stop"),
 ]

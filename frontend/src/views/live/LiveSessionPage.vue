@@ -5,7 +5,6 @@ import { ElMessage } from "element-plus";
 import {
   getLiveSessions,
   getLiveSessionDetail,
-  getLiveSessionPreviewFrame,
   startLiveSession,
   stopLiveSession,
 } from "@/api/liveSession";
@@ -25,6 +24,7 @@ let timer = null;
 let previewCounter = 0;
 let leaveStopping = false;
 let polling = false;
+let previewStreamController = null;
 
 const REALTIME_DEFAULTS = {
   camera_width: 320,
@@ -181,16 +181,88 @@ function stopPolling() {
   polling = false;
 }
 
-async function refreshPreviewFrame(sessionId) {
+function updatePreviewBlob(bytes) {
+  if (!bytes?.length) return;
+  const blob = new Blob([bytes], { type: "image/jpeg" });
+  const nextUrl = URL.createObjectURL(blob);
+  const prevUrl = previewFrameUrl.value;
+  previewFrameUrl.value = nextUrl;
+  if (prevUrl) URL.revokeObjectURL(prevUrl);
+}
+
+function findMarker(buffer, marker, fromIndex = 0) {
+  for (let index = fromIndex; index <= buffer.length - marker.length; index += 1) {
+    let matched = true;
+    for (let offset = 0; offset < marker.length; offset += 1) {
+      if (buffer[index + offset] !== marker[offset]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return index;
+  }
+  return -1;
+}
+
+function concatBytes(left, right) {
+  if (!left.length) return right;
+  const merged = new Uint8Array(left.length + right.length);
+  merged.set(left, 0);
+  merged.set(right, left.length);
+  return merged;
+}
+
+function stopPreviewStream() {
+  if (previewStreamController) {
+    previewStreamController.abort();
+    previewStreamController = null;
+  }
+}
+
+async function startPreviewStream(sessionId) {
+  stopPreviewStream();
+  const token = getStoredAccessToken();
+  if (!token) return;
+  const controller = new AbortController();
+  previewStreamController = controller;
   try {
-    const blob = await getLiveSessionPreviewFrame(sessionId);
-    if (!(blob instanceof Blob) || blob.size === 0) return;
-    const nextUrl = URL.createObjectURL(blob);
-    const prevUrl = previewFrameUrl.value;
-    previewFrameUrl.value = nextUrl;
-    if (prevUrl) URL.revokeObjectURL(prevUrl);
-  } catch {
-    // 会话刚启动时可能暂时没有预览帧，这里直接忽略。
+    const response = await fetch(`/api/live-session/sessions/${sessionId}/preview-stream/`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    });
+    if (!response.ok || !response.body) return;
+
+    const reader = response.body.getReader();
+    let buffer = new Uint8Array();
+    const startMarker = new Uint8Array([0xff, 0xd8]);
+    const endMarker = new Uint8Array([0xff, 0xd9]);
+    while (!controller.signal.aborted) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer = concatBytes(buffer, value);
+      while (buffer.length) {
+        const start = findMarker(buffer, startMarker);
+        if (start < 0) {
+          buffer = buffer.slice(Math.max(0, buffer.length - 1));
+          break;
+        }
+        const end = findMarker(buffer, endMarker, start + 2);
+        if (end < 0) {
+          buffer = buffer.slice(start);
+          break;
+        }
+        updatePreviewBlob(buffer.slice(start, end + 2));
+        buffer = buffer.slice(end + 2);
+      }
+    }
+  } catch (error) {
+    if (!controller.signal.aborted) {
+      console.warn("实时预览流已断开", error);
+    }
+  } finally {
+    if (previewStreamController === controller) {
+      previewStreamController = null;
+    }
   }
 }
 
@@ -199,13 +271,13 @@ async function pollSession(sessionId) {
   polling = true;
   try {
     previewCounter += 1;
-    await refreshPreviewFrame(sessionId);
     if (previewCounter % 3 === 0) {
       const data = await getLiveSessionDetail(sessionId);
       currentSession.value = data;
       if (["success", "failed", "stopped"].includes(data.status)) {
         pauseReferenceVideo();
         stopPolling();
+        stopPreviewStream();
         return;
       }
     }
@@ -221,6 +293,7 @@ async function pollSession(sessionId) {
 
 function startPolling(sessionId) {
   stopPolling();
+  startPreviewStream(sessionId);
   previewCounter = 0;
   timer = window.setTimeout(() => {
     pollSession(sessionId);
@@ -261,6 +334,7 @@ async function handleStop() {
   if (!currentSession.value?.id) return;
   await stopLiveSession(currentSession.value.id);
   pauseReferenceVideo();
+  stopPreviewStream();
   ElMessage.success("已发送停止信号");
 }
 
@@ -274,6 +348,7 @@ async function stopSessionBeforeLeave() {
   } finally {
     pauseReferenceVideo();
     stopPolling();
+    stopPreviewStream();
     leaveStopping = false;
   }
 }
@@ -306,6 +381,7 @@ onBeforeUnmount(() => {
   handlePageHide();
   pauseReferenceVideo();
   stopPolling();
+  stopPreviewStream();
   revokePreviewUrl();
   window.removeEventListener("pagehide", handlePageHide);
 });

@@ -638,9 +638,20 @@ def finalize_scoring_outputs(
     out_video: Optional[str],
     preview: bool,
     progress_callback: Optional[Callable[[int, str], None]] = None,
+    timing_events: Optional[list[Dict[str, Any]]] = None,
+    output_frame_stride: int = 1,
 ) -> Dict[str, Any]:
     """汇总离线评估结果，并按需生成 JSON、DTW 图和对比视频。"""
 
+    finalize_started = time.perf_counter()
+    timing_stages: list[Dict[str, Any]] = list(timing_events or [])
+
+    def record_stage(stage: str, started_at: float, **extra: Any) -> None:
+        row: Dict[str, Any] = {"stage": stage, "elapsed_s": round(time.perf_counter() - started_at, 3)}
+        row.update(extra)
+        timing_stages.append(row)
+
+    stage_started = time.perf_counter()
     norm_dist = dist / max(1, len(path))
     global_dtw_score = distance_to_score(norm_dist, score_scale)
 
@@ -675,10 +686,12 @@ def finalize_scoring_outputs(
         hint_threshold=hint_threshold,
     )
     score = _weighted_phase_score(phase_scores, fallback=global_dtw_score)
+    record_stage("score_breakdown_and_hints", stage_started, hint_count=int(len(hints)))
 
     ensure_parent_dir(out_json)
     if progress_callback:
         progress_callback(55, "正在生成分阶段 DTW 图")
+    stage_started = time.perf_counter()
     phase_plot_dir = os.path.join(os.path.dirname(os.path.abspath(out_plot)), "phase_plots")
     phase_plots = save_phase_plots(
         ref_data=ref_data,
@@ -688,6 +701,7 @@ def finalize_scoring_outputs(
         out_dir=phase_plot_dir,
         score_scale=score_scale,
     )
+    record_stage("phase_plot_export", stage_started, plot_count=int(len(phase_plots)))
     result = {
         "mode": "baduanjin_pose_dtw_weighted",
         "reference_video": ref_video,
@@ -723,11 +737,9 @@ def finalize_scoring_outputs(
         },
         "hints": hints,
     }
-    with open(out_json, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-
     if progress_callback:
         progress_callback(62, "正在生成整体 DTW 曲线")
+    stage_started = time.perf_counter()
     save_plot(
         ref_data=ref_data,
         qry_data=qry_data,
@@ -737,6 +749,7 @@ def finalize_scoring_outputs(
         score=score,
         norm_dist=norm_dist,
     )
+    record_stage("overall_plot_export", stage_started)
 
     frame_hint_map: Dict[int, str] = {}
     for hint in hints:
@@ -772,6 +785,7 @@ def finalize_scoring_outputs(
     if out_video or preview:
         if progress_callback:
             progress_callback(72, "正在渲染对比视频")
+        stage_started = time.perf_counter()
         render_feedback_video(
             ref_video=ref_video,
             query_video=query_video,
@@ -790,9 +804,26 @@ def finalize_scoring_outputs(
             progress_callback=progress_callback,
             progress_range=(72, 92),
             compare_panel_height=540,
+            output_frame_stride=max(1, int(output_frame_stride)),
+        )
+        record_stage(
+            "feedback_video_render",
+            stage_started,
+            enabled=bool(out_video),
+            preview=bool(preview),
+            output_frame_stride=max(1, int(output_frame_stride)),
         )
     elif progress_callback:
         progress_callback(92, "评估结果已生成")
+
+    result["runtime_profile"] = {
+        "stages": timing_stages,
+        "total_recorded_s": round(sum(float(item.get("elapsed_s", 0.0)) for item in timing_stages), 3),
+        "finalize_outputs_elapsed_s": round(time.perf_counter() - finalize_started, 3),
+        "includes_video": bool(out_video or preview),
+    }
+    with open(out_json, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
 
     return {
         "result": result,
@@ -819,6 +850,8 @@ def run_dtw_scoring(
     preview: bool = False,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, Any]:
+    timing_stages: list[Dict[str, Any]] = []
+    stage_started = time.perf_counter()
     if progress_callback:
         progress_callback(8, "正在提取标准视频姿态")
     ref_data = extract_pose_sequence(
@@ -830,8 +863,16 @@ def run_dtw_scoring(
         preview=preview,
         preview_title="Reference Pose Preview",
     )
+    timing_stages.append(
+        {
+            "stage": "reference_pose_extract",
+            "elapsed_s": round(time.perf_counter() - stage_started, 3),
+            "sequence_length": int(ref_data["features"].shape[0]),
+        }
+    )
     if progress_callback:
         progress_callback(25, "正在提取待测视频姿态")
+    stage_started = time.perf_counter()
     qry_data = extract_pose_sequence(
         video_path=query_video,
         task_model=task_model,
@@ -841,16 +882,31 @@ def run_dtw_scoring(
         preview=preview,
         preview_title="Query Pose Preview",
     )
+    timing_stages.append(
+        {
+            "stage": "query_pose_extract",
+            "elapsed_s": round(time.perf_counter() - stage_started, 3),
+            "sequence_length": int(qry_data["features"].shape[0]),
+        }
+    )
     ref_data = _ensure_baduanjin_features(ref_data)
     qry_data = _apply_template_feature_stats(qry_data, ref_data)
     qry_data = _ensure_baduanjin_features(qry_data)
     if progress_callback:
         progress_callback(42, "正在执行 DTW 对齐")
+    stage_started = time.perf_counter()
     dist, path = dtw_distance_multidim(
         ref_data["features"],
         qry_data["features"],
         a_weights=ref_data.get("feature_confidence_weights"),
         b_weights=qry_data.get("feature_confidence_weights"),
+    )
+    timing_stages.append(
+        {
+            "stage": "dtw_alignment",
+            "elapsed_s": round(time.perf_counter() - stage_started, 3),
+            "alignment_path_length": int(len(path)),
+        }
     )
     if progress_callback:
         progress_callback(50, "正在生成评分结果")
@@ -870,6 +926,8 @@ def run_dtw_scoring(
         out_video=out_video,
         preview=preview,
         progress_callback=progress_callback,
+        timing_events=timing_stages,
+        output_frame_stride=max(1, int(frame_stride)),
     )
 
 
@@ -892,9 +950,19 @@ def run_dtw_scoring_from_template(
     """直接加载模板并处理测试视频，适合重复评估。"""
 
     # 直接加载模板并只处理待测视频，适合重复评分场景。
+    timing_stages: list[Dict[str, Any]] = []
+    stage_started = time.perf_counter()
     ref_data = load_pose_template(template_path)
+    timing_stages.append(
+        {
+            "stage": "template_load",
+            "elapsed_s": round(time.perf_counter() - stage_started, 3),
+            "sequence_length": int(ref_data["features"].shape[0]),
+        }
+    )
     if progress_callback:
         progress_callback(12, "模板已加载，正在提取待测视频姿态")
+    stage_started = time.perf_counter()
     qry_data = extract_pose_sequence(
         video_path=query_video,
         task_model=query_task_model or ref_data["task_model"],
@@ -904,6 +972,14 @@ def run_dtw_scoring_from_template(
         preview=preview,
         preview_title="Query Pose Preview",
     )
+    timing_stages.append(
+        {
+            "stage": "query_pose_extract",
+            "elapsed_s": round(time.perf_counter() - stage_started, 3),
+            "sequence_length": int(qry_data["features"].shape[0]),
+        }
+    )
+    stage_started = time.perf_counter()
     qry_data = _apply_template_feature_stats(qry_data, ref_data)
     qry_data = _ensure_baduanjin_features(qry_data)
     if progress_callback:
@@ -916,6 +992,13 @@ def run_dtw_scoring_from_template(
     )
     if progress_callback:
         progress_callback(50, "正在生成评分结果")
+    timing_stages.append(
+        {
+            "stage": "dtw_alignment",
+            "elapsed_s": round(time.perf_counter() - stage_started, 3),
+            "alignment_path_length": int(len(path)),
+        }
+    )
     summary = finalize_scoring_outputs(
         ref_data=ref_data,
         qry_data=qry_data,
@@ -932,6 +1015,8 @@ def run_dtw_scoring_from_template(
         out_video=out_video,
         preview=preview,
         progress_callback=progress_callback,
+        timing_events=timing_stages,
+        output_frame_stride=max(1, int(query_frame_stride or ref_data.get("frame_stride", 1))),
     )
     summary["template_path"] = template_path
     return summary

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from django.http import HttpResponse
+import time
+
+from django.http import HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -68,7 +70,7 @@ def live_session_start_view(request):
         hint_threshold=validated.get("hint_threshold", "0.200"),
         hint_min_interval=validated.get("hint_min_interval", 60),
         max_hints=validated.get("max_hints", 360),
-        ref_search_window=validated.get("ref_search_window", 60),
+        ref_search_window=validated.get("ref_search_window", 12),
     )
     start_live_session(session)
     session.refresh_from_db()
@@ -128,3 +130,38 @@ def live_session_preview_frame_view(request, session_id: int):
     if not frame_bytes:
         return HttpResponse(status=204)
     return HttpResponse(frame_bytes, content_type="image/jpeg")
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def live_session_preview_stream_view(request, session_id: int):
+    """以 MJPEG 形式持续返回实时预览帧，减少前端轮询开销。"""
+
+    get_object_or_404(_visible_sessions(request.user), id=session_id)
+
+    def frame_stream():
+        last_frame = b""
+        inactive_ticks = 0
+        while True:
+            runtime = session_registry_status(session_id)
+            frame_bytes = get_live_session_preview_frame(session_id)
+            if frame_bytes and frame_bytes != last_frame:
+                last_frame = frame_bytes
+                inactive_ticks = 0
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    + f"Content-Length: {len(frame_bytes)}\r\n\r\n".encode("ascii")
+                    + frame_bytes
+                    + b"\r\n"
+                )
+            elif not runtime.get("active"):
+                inactive_ticks += 1
+                if inactive_ticks >= 10:
+                    break
+            time.sleep(0.08)
+
+    response = StreamingHttpResponse(frame_stream(), content_type="multipart/x-mixed-replace; boundary=frame")
+    response["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response["X-Accel-Buffering"] = "no"
+    return response
