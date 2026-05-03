@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import threading
 import time
@@ -124,6 +125,20 @@ def _get_registry_latest_state(session_id: int) -> dict:
             return {}
         state = entry.get("latest_state", {})
     return dict(state) if isinstance(state, dict) else {}
+
+
+def _json_safe(value):
+    """Convert non-standard float values before they reach JsonResponse."""
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def _run_live_session_worker(session_id: int, stop_event: threading.Event) -> None:
@@ -297,7 +312,7 @@ def get_live_session_runtime_payload(session_id: int) -> dict:
         if not entry:
             return {}
         state = entry.get("latest_state", {})
-    return dict(state) if isinstance(state, dict) else {}
+    return _json_safe(dict(state)) if isinstance(state, dict) else {}
 
 
 def _safe_remove_path(path_str: str) -> None:

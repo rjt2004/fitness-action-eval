@@ -50,17 +50,35 @@ const form = reactive({
 const runtimeModelOptions = [{ value: "follow_template", label: "跟随模板模型" }];
 const practiceAudioUrl = "/media/template_center/source/八段锦完整版.m4a";
 const sessionActive = computed(() => ["pending", "running"].includes(currentSession.value?.status || ""));
+const partNameMap = {
+  hands: "手部",
+  shoulders: "肩部",
+  elbows: "肘部",
+  torso: "躯干",
+  waist: "腰胯",
+  hips: "髋部",
+  knees: "膝部",
+  feet: "脚部",
+  head_neck: "头颈",
+  pose: "姿态",
+};
+
+function formatPartName(part) {
+  if (!part) return "";
+  return partNameMap[part] || part;
+}
 
 const realtimeInfo = computed(() => {
   const runtime = currentSession.value?.runtime_payload || {};
   const summary = currentSession.value?.summary_payload || {};
+  const summaryRuntime = summary.runtime_state || {};
   const latestHint = Array.isArray(summary.hints) && summary.hints.length ? summary.hints[summary.hints.length - 1] : {};
-  const confidence = runtime.confidence || summary.runtime_state?.confidence || {};
+  const confidence = runtime.confidence || summaryRuntime.confidence || {};
   return {
-    phase_name: runtime.phase_name || summary.final_phase_name || currentSession.value?.final_phase_name || "",
-    part: runtime.part || latestHint.part || currentSession.value?.final_part || "",
-    message: runtime.message || latestHint.message || "",
-    local_error: runtime.local_error ?? "",
+    phase_name: runtime.phase_name || summaryRuntime.phase_name || summary.final_phase_name || currentSession.value?.final_phase_name || "",
+    part: formatPartName(runtime.part || summaryRuntime.part || latestHint.part || currentSession.value?.final_part || ""),
+    message: runtime.message || summaryRuntime.message || latestHint.message || "",
+    local_error: runtime.local_error ?? summaryRuntime.local_error ?? "",
     confidence_mean: confidence.mean ?? "",
     confidence_min: confidence.min ?? "",
     valid_points: confidence.valid_points ?? "",
@@ -271,7 +289,9 @@ async function pollSession(sessionId) {
   polling = true;
   try {
     previewCounter += 1;
-    if (previewCounter % 3 === 0) {
+    const runtime = currentSession.value?.runtime_payload || {};
+    const needsRuntimeState = sessionActive.value && !runtime.phase_name && !runtime.message;
+    if (previewCounter === 1 || previewCounter % 3 === 0 || needsRuntimeState) {
       const data = await getLiveSessionDetail(sessionId);
       currentSession.value = data;
       if (["success", "failed", "stopped"].includes(data.status)) {
@@ -332,8 +352,10 @@ async function handleStart() {
 
 async function handleStop() {
   if (!currentSession.value?.id) return;
-  await stopLiveSession(currentSession.value.id);
+  const data = await stopLiveSession(currentSession.value.id);
+  currentSession.value = data;
   pauseReferenceVideo();
+  stopPolling();
   stopPreviewStream();
   ElMessage.success("已发送停止信号");
 }

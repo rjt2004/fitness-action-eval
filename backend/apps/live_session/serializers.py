@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from rest_framework import serializers
@@ -15,6 +16,18 @@ from fitness_action_eval.model_options import (
 )
 
 from .models import LiveSession
+
+
+def json_safe(value):
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [json_safe(item) for item in value]
+    return value
 
 
 class LiveSessionStartSerializer(serializers.Serializer):
@@ -140,7 +153,7 @@ class LiveSessionDetailSerializer(LiveSessionListSerializer):
         )
 
     def get_summary_payload(self, obj: LiveSession) -> dict:
-        return self._load_summary_payload(obj)
+        return json_safe(self._load_summary_payload(obj))
 
     def get_runtime_payload(self, obj: LiveSession) -> dict:
         from .services import get_live_session_runtime_payload
