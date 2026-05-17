@@ -2,7 +2,6 @@ import { createRouter, createWebHistory } from "vue-router";
 
 import MainLayout from "@/layout/MainLayout.vue";
 import Login from "@/views/Login.vue";
-import Dashboard from "@/views/Dashboard.vue";
 import UserManagement from "@/views/UserManagement.vue";
 import TemplateList from "@/views/template/TemplateList.vue";
 import EvaluationCreate from "@/views/evaluation/EvaluationCreate.vue";
@@ -14,7 +13,7 @@ import LiveSessionDetail from "@/views/live/LiveSessionDetail.vue";
 import { useAuthStore } from "@/stores/auth";
 
 function defaultRouteByRole(role) {
-  return role === "admin" ? { name: "dashboard" } : { name: "evaluation-create" };
+  return role === "admin" ? { name: "users" } : { name: "evaluation-create" };
 }
 
 const router = createRouter({
@@ -32,12 +31,6 @@ const router = createRouter({
       children: [
         {
           path: "",
-          name: "dashboard",
-          component: Dashboard,
-          meta: { role: "admin", title: "系统概览" },
-        },
-        {
-          path: "users",
           name: "users",
           component: UserManagement,
           meta: { role: "admin", title: "用户管理" },
@@ -99,10 +92,6 @@ router.beforeEach((to) => {
 
   if (!authStore.accessToken) {
     return { name: "login", query: { redirect: to.fullPath } };
-  }
-
-  if (to.name === "dashboard" && authStore.user?.role !== "admin") {
-    return defaultRouteByRole(authStore.user?.role);
   }
 
   if (to.meta.role && authStore.user?.role !== to.meta.role) {

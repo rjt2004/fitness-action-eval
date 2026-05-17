@@ -1,235 +1,173 @@
-# 健身动作评价
+# 基于图像的健身动作评价系统
 
-本项目是一个“基于图像的健身动作评价系统设计与实现”毕业设计项目。系统以人体姿态估计为基础，通过标准动作模板与待评估动作之间的时序对齐、姿态相似度计算和局部偏差分析，实现健身动作评分、纠错提示、结果可视化和前后端管理。
+本项目是一个面向健身动作教学与纠错场景的毕业设计系统。系统以人体姿态估计为基础，结合标准动作模板、DTW 时序对齐、关键点与关节角特征、局部部位误差分析，实现离线动作评估、实时跟练提示、模板管理、结果查询和用户管理等功能。当前验证动作以八段锦为主。
 
-当前系统以八段锦作为核心验证对象，已经完成算法专项化、Django 后端、Vue 前端、数据库设计、模板管理、离线评估、结果查询、实时跟练和论文配套图表材料整理等功能。
+## 功能概览
 
-## 当前工作进度
-
-- 算法端已经完成八段锦专项阶段划分、子阶段规则、阶段重点部位权重、置信度加权、分阶段评分、部位偏差分析和中文纠错提示。
-- 离线评估已经支持上传待测视频、读取标准模板、输出总分、阶段分数、部位分数、纠错提示、分阶段 DTW 图和可选对比视频。
-- 离线评估导出视频已经完成性能优化：结果视频使用快速 MP4 封装，导出阶段按评估抽帧步长写出视频，并在结果 JSON 中记录姿态提取、DTW、评分、绘图、视频渲染和封装耗时。
-- 实时跟练已经支持摄像头/本地视频源、标准视频同步播放、实时骨架绘制、提示卡片、置信度信息、无人体检测提示和 MJPEG 预览流。
-- 前端页面已经完成登录、模板管理、离线评估、评估详情、实时跟练、实时会话列表和用户管理等主要页面。
-- 评估详情页当前保留任务信息、对比视频、分阶段 DTW 图、阶段与部位评分、纠错提示，已去掉子阶段评分和姿态识别质量两个展示卡片。
-- 数据库已经覆盖用户、模板、文件资源、离线评估任务、阶段结果、纠错提示和实时跟练会话等核心业务表。
-- 毕业论文目录、系统结构图、数据库图、流程图和主要实验材料已经完成初步整理。
-
-## 当前功能
-
-- 用户登录与角色权限：支持 `admin` 和 `user` 两类用户。
-- 模板管理：管理员可上传标准视频、生成标准动作模板、重新生成或删除模板。
-- 离线评估：用户上传待测视频，系统输出总分、分阶段结果、部位评分、纠错提示和 DTW 可视化图。
-- 可选视频导出：离线评估默认不导出对比视频；开启后生成标准动作与待测动作的对比视频。
-- 实时跟练：支持摄像头编号、本地视频路径或网络视频流作为输入源，输出实时骨架画面、同步参考视频和提示卡片。
-- 结果中心：支持查看评估结果、提示列表、分阶段 DTW 图，并支持删除记录。
-- 会话记录：支持查看实时跟练会话摘要、参数和提示列表，并支持删除记录。
+- 用户登录与权限管理：支持管理员和普通用户两类角色。
+- 模板管理：管理员上传标准动作视频，生成动作模板和阶段规则配置。
+- 离线评估：上传待测视频后，系统输出总分、阶段得分、部位得分、纠错提示、DTW 图和可选对比视频。
+- 实时跟练：支持摄像头、本地视频或 OpenCV 可读取的视频流作为输入，实时显示骨架画面、参考视频和纠错提示。
+- 结果中心：查看、删除离线评估任务和实时跟练会话记录。
+- 算法模块：完成人体关键点提取、特征归一化、平滑处理、DTW 对齐、评分映射和提示生成。
 
 ## 技术栈
 
-- 算法层：Python、OpenCV、MediaPipe Pose、NumPy、DTW
-- 后端：Django、Django REST Framework、Simple JWT、MySQL
+- 算法：Python、OpenCV、MediaPipe Pose、NumPy、Matplotlib、Pillow、ImageIO
+- 后端：Django、Django REST Framework、Simple JWT、MySQL、PyMySQL
 - 前端：Vue 3、Vite、Element Plus、Pinia、Axios、ECharts
-- 数据库：MySQL
 - 文件存储：本地 `media/` 目录
 
-## 算法设计
+## 目录结构
 
-### 姿态特征
-
-系统首先从视频中提取人体 33 个关键点，并进行归一化处理：
-
-- 以两髋中心作为坐标原点。
-- 以肩中心到髋中心的距离作为尺度因子。
-- 将人物位置、身高和画面尺度差异尽量消除。
-
-每一帧的姿态特征由两部分组成：
-
-- `66维`：33 个关键点的二维坐标。
-- `8维`：左肩、右肩、左肘、右肘、左髋、右髋、左膝、右膝关节角。
-
-最终形成 `74维` 姿态特征。
-
-### 八段锦阶段划分
-
-当前八段锦标准视频采用人工标注阶段边界：
-
-- 预备势：`00:00-00:45`
-- 双手托天理三焦：`00:45-02:20`
-- 左右开弓似射雕：`02:20-03:45`
-- 调理脾胃须单举：`03:45-05:05`
-- 五劳七伤往后瞧：`05:05-06:10`
-- 摇头摆尾去心火：`06:10-07:55`
-- 两手攀足固肾腰：`07:55-10:00`
-- 攒拳怒目增气力：`10:00-11:00`
-- 背后七颠百病消：`11:00-11:50`
-- 收势：`11:50-12:12`
-
-系统会根据标准视频时间点生成阶段 ID，并在评分、提示和结果展示中使用。
-
-### 评分规则
-
-评分流程如下：
-
-1. 提取标准视频和测试视频的人体姿态序列。
-2. 构建 33 点坐标和 8 个关节角组成的特征向量。
-3. 根据八段锦不同阶段对重点部位进行加权。
-4. 使用 DTW 对标准动作和测试动作进行时序对齐。
-5. 在对齐路径上计算阶段局部距离、子阶段局部距离和部位局部误差。
-6. 根据阶段时长权重汇总分阶段得分，形成最终 `0-100` 分。
-
-分数映射方式：
-
-```python
-score = 100 * (1 - normalized_distance / score_scale)
+```text
+fitness-action-eval/
+├─ backend/                 # Django 后端
+│  ├─ apps/                 # 业务应用：用户、模板、评估、实时跟练
+│  ├─ config/               # 后端配置、路由、视频工具
+│  ├─ .env.example          # 后端环境变量示例
+│  └─ manage.py
+├─ fitness_action_eval/     # 姿态识别、DTW、评分、可视化等算法代码
+├─ frontend/                # Vue 前端
+├─ media/                   # 上传文件与运行结果，运行时自动生成，不提交
+├─ input/                   # 本地测试输入目录，运行时使用
+├─ output/                  # 本地测试输出目录，运行时使用
+├─ pose_landmarker_lite.task
+├─ pose_landmarker_full.task
+├─ pose_landmarker_heavy.task
+├─ requirements.txt
+└─ README.md
 ```
 
-其中 `score_scale` 默认为 `8.0`，分数会被限制在 `0-100` 范围内。当前最终分数以分阶段局部 DTW 得分的加权平均为主，全局 DTW 得分作为结果 JSON 中的对照字段保留。
+## 环境要求
 
-### 置信度处理
+建议使用以下版本，换设备部署时尽量保持一致：
 
-系统会读取 MediaPipe 输出的关键点置信度，并在评分和可视化中使用：
+- Python 3.10 或 3.11
+- Node.js 18 或 20
+- MySQL 8.0
+- Windows 10/11、macOS 或 Linux 均可运行；实时摄像头功能需要运行后端的设备能访问摄像头
 
-- 标准视频模板中保存参考动作关键点置信度。
-- 待测视频提取姿态时同步保存关键点置信度。
-- 评分时会根据参考视频和待测视频的关键点置信度降低低可信关键点对距离的影响。
-- 结果视频和实时画面中的骨架颜色用于表达关键点置信度。
-- 实时跟练提示卡片中展示识别状态和置信度信息。
+说明：项目已包含 `pose_landmarker_lite.task`、`pose_landmarker_full.task` 和 `pose_landmarker_heavy.task` 三个 MediaPipe 姿态模型文件，克隆项目后请确认这三个文件位于项目根目录。
 
-### 提示规则
+## 后端部署
 
-提示不是直接根据总分生成，而是根据局部身体部位误差生成。系统会分析：
-
-- 头颈
-- 肩肘
-- 手部
-- 躯干
-- 腰胯
-- 髋部
-- 膝部
-- 足部
-
-每个部位误差由关键点误差和关节角误差融合：
-
-```python
-part_error = 0.8 * point_error + 0.2 * angle_error
-```
-
-不同八段锦阶段会有不同关注重点。例如：
-
-- 双手托天理三焦：重点关注手部、肩部和躯干上拔。
-- 左右开弓似射雕：重点关注手部开弓、肩背展开、马步和腰胯稳定。
-- 调理脾胃须单举：重点关注上下撑按、肩部舒展和躯干中正。
-- 五劳七伤往后瞧：重点关注头颈转动、肩部放松和躯干稳定。
-- 两手攀足固肾腰：重点关注前俯幅度、手部下探和腰背放松。
-
-当某个重点部位误差超过提示阈值时，系统会生成对应中文纠错建议。
-
-## 系统模块
-
-### 管理员功能
-
-- 系统概览
-- 模板管理
-- 查看所有用户离线评估结果
-- 查看所有用户实时会话记录
-
-### 普通用户功能
-
-- 离线评估
-- 评估结果查看
-- 实时跟练
-- 实时会话记录
-
-## 后端模块
-
-后端位于 `backend/`：
-
-- `apps/accounts`：用户、角色和 JWT 登录认证。
-- `apps/template_manager`：标准视频、动作模板和文件资源管理。
-- `apps/evaluation_center`：离线评估任务、结果入库、提示入库、导出视频优化和删除。
-- `apps/live_session`：实时跟练会话、MJPEG 实时预览流、会话摘要和删除。
-- `config`：Django 配置、统一响应、视频封装与转码工具。
-
-## 前端模块
-
-前端位于 `frontend/`：
-
-- `src/views/Login.vue`：登录页。
-- `src/views/template/TemplateList.vue`：模板管理。
-- `src/views/evaluation/EvaluationCreate.vue`：创建离线评估。
-- `src/views/evaluation/EvaluationList.vue`：评估结果列表。
-- `src/views/evaluation/EvaluationDetail.vue`：评估详情，展示任务信息、对比视频、阶段图表、阶段/部位评分和纠错提示。
-- `src/views/live/LiveSessionPage.vue`：实时跟练，展示参考视频、实时骨架预览和提示卡片。
-- `src/views/live/LiveSessionList.vue`：实时会话列表。
-- `src/views/live/LiveSessionDetail.vue`：实时会话详情。
-
-## 数据库核心表
-
-- `sys_user`：用户表。
-- `action_category`：动作类别表。
-- `template_video`：标准模板表。
-- `file_asset`：文件资源表。
-- `evaluation_task`：离线评估任务表。
-- `evaluation_phase_result`：分阶段结果表。
-- `evaluation_hint`：纠错提示表。
-- `live_session`：实时跟练会话表。
-
-## 本地运行
-
-### 1. 安装依赖
+### 1. 克隆项目
 
 ```bash
+git clone git@github.com:rjt2004/fitness-action-eval.git
+cd fitness-action-eval
+```
+
+如果没有配置 SSH，也可以使用 HTTPS 地址：
+
+```bash
+git clone https://github.com/rjt2004/fitness-action-eval.git
+cd fitness-action-eval
+```
+
+### 2. 创建并激活 Python 虚拟环境
+
+Windows PowerShell：
+
+```powershell
 python -m venv .venv
-.venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-前端依赖：
+macOS/Linux：
 
 ```bash
-cd frontend
-npm install
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-### 2. 配置数据库
+### 3. 创建 MySQL 数据库
 
-后端默认从 `backend/.env` 读取数据库配置。示例文件见：
+登录 MySQL 后执行：
+
+```sql
+CREATE DATABASE fitness_action_eval DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+```
+
+### 4. 配置后端环境变量
+
+复制示例配置文件：
+
+Windows PowerShell：
+
+```powershell
+Copy-Item backend\.env.example backend\.env
+```
+
+macOS/Linux：
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+根据本机数据库账号修改 `backend/.env`：
 
 ```text
-backend/.env.example
+DJANGO_SECRET_KEY=replace-with-your-secret-key
+DJANGO_DEBUG=true
+DJANGO_ALLOWED_HOSTS=127.0.0.1,localhost
+DJANGO_TIME_ZONE=Asia/Shanghai
+
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_DATABASE=fitness_action_eval
+MYSQL_USER=root
+MYSQL_PASSWORD=123456
 ```
 
-执行迁移：
+如果需要让局域网其他设备访问后端，把本机局域网 IP 加入 `DJANGO_ALLOWED_HOSTS`，例如：
+
+```text
+DJANGO_ALLOWED_HOSTS=127.0.0.1,localhost,192.168.1.10
+```
+
+### 5. 初始化数据库
 
 ```bash
 cd backend
 python manage.py migrate
-```
-
-创建管理员：
-
-```bash
 python manage.py createsuperuser
 ```
 
-### 3. 启动后端
+创建的超级用户可用于登录系统，管理员登录后可以继续创建普通用户。
+
+### 6. 启动后端
+
+本机访问：
 
 ```bash
-cd backend
-python manage.py runserver
+python manage.py runserver 127.0.0.1:8000
 ```
 
-局域网访问时使用：
+局域网访问：
 
 ```bash
 python manage.py runserver 0.0.0.0:8000
 ```
 
-### 4. 启动前端
+后端健康检查接口：
+
+```text
+http://127.0.0.1:8000/api/system/health/
+```
+
+## 前端部署
+
+新开一个终端进入项目根目录，安装并启动前端：
 
 ```bash
 cd frontend
+npm install
 npm run dev
 ```
 
@@ -239,44 +177,62 @@ npm run dev
 http://127.0.0.1:5173
 ```
 
-局域网其他设备访问时，将 `127.0.0.1` 替换为本机局域网 IP。
+开发环境下，Vite 会把 `/api` 和 `/media` 请求代理到 `http://127.0.0.1:8000`。如果后端不在本机运行，请修改 `frontend/vite.config.js` 中的代理地址。
 
-## 常用参数
+前端生产构建：
 
-离线评估默认参数：
+```bash
+cd frontend
+npm run build
+```
 
-- `frame_stride=6`
-- `smooth_window=3`
-- `hint_threshold=0.20`
-- `hint_min_interval=12`
-- `max_hints=24`
-- `export_video=false`
+## 首次使用流程
 
-实时跟练默认参数：
+1. 启动 MySQL、Django 后端和 Vue 前端。
+2. 使用 `createsuperuser` 创建的管理员账号登录。
+3. 在模板管理页面上传标准动作视频，并选择姿态模型生成模板。
+4. 普通用户或管理员进入离线评估页面，选择模板并上传待测视频。
+5. 在评估详情页查看总分、阶段得分、部位得分、纠错提示、DTW 图和可选对比视频。
+6. 在实时跟练页面选择模板和输入源，开始实时跟练会话。
 
-- `camera_width=640`
-- `camera_height=360`
-- `frame_stride=2`
-- `smooth_window=1`
-- `hint_threshold=0.20`
-- `hint_min_interval=60`
-- `max_hints=240`
-- `ref_search_window=12`
+## 常用参数说明
 
-说明：
+离线评估常用参数：
 
-- `frame_stride` 越大，处理越快，但评分粒度会降低。
-- `smooth_window` 越大，姿态更平滑，但响应更慢。
-- `hint_threshold` 越低，提示越容易触发。
-- `hint_min_interval` 越大，提示越稀疏。
-- `max_hints` 控制最多输出多少条提示。
+- `frame_stride`：抽帧步长，值越大处理越快，但评分粒度会降低。
+- `smooth_window`：姿态序列平滑窗口，值越大越平滑，但响应会变慢。
+- `hint_threshold`：提示触发阈值，值越低越容易生成纠错提示。
+- `hint_min_interval`：提示最小间隔，用于避免短时间内重复提示。
+- `max_hints`：单次评估最多保留的提示数量。
+- `export_video`：是否导出标准动作与待测动作的对比视频。
 
-## 实时跟练说明
+实时跟练常用参数：
 
-当前实时跟练适合使用本机摄像头、本地视频文件或 OpenCV 可读取的网络视频流进行测试。前端实时预览使用 MJPEG 流传输，减少逐帧 HTTP 轮询带来的卡顿；状态信息、识别置信度和未检测到人体等提示显示在结果卡片中，画面区域主要保留骨架绘制。
+- `camera_source`：输入源，`0` 表示运行后端设备的默认摄像头，也可以填写本地视频路径或网络视频流地址。
+- `camera_width`、`camera_height`：摄像头采集分辨率。
+- `frame_stride`：实时处理抽帧步长。
+- `ref_search_window`：参考帧局部搜索窗口，用于实时跟练时匹配当前动作进度。
 
-注意：
+## 注意事项
 
-- `camera_source=0` 表示运行后端这台电脑的默认摄像头。
-- 如果前端在另一台电脑访问，当前后端仍然读取服务器电脑的视频源。
-- 实时跟练最终评分会降低评分频率，并限制最终评分采样帧数，以减少长时间跟练结束时的等待。
+- `media/`、`input/`、`output/`、`frontend/node_modules/` 和 `frontend/dist/` 为运行时或构建产物，不需要提交到 Git。
+- 实时摄像头输入由后端进程读取；如果前端在另一台设备访问，摄像头仍然是后端所在设备的摄像头。
+- 视频导出依赖 `imageio-ffmpeg` 提供的 FFmpeg，可减少不同设备上手动安装 FFmpeg 的步骤。
+- MediaPipe 对 Python 版本较敏感，推荐使用 Python 3.10 或 3.11。
+- 如果安装依赖时 OpenCV 或 MediaPipe 下载较慢，可以切换到稳定的 PyPI 镜像源后重试。
+
+## 基础检查命令
+
+后端检查：
+
+```bash
+cd backend
+python manage.py check
+```
+
+前端构建检查：
+
+```bash
+cd frontend
+npm run build
+```

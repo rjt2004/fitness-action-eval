@@ -10,7 +10,6 @@ const route = useRoute();
 const authStore = useAuthStore();
 const loading = ref(false);
 
-// 登录表单只保留最基础的账号密码字段。
 const form = reactive({
   username: "",
   password: "",
@@ -35,83 +34,123 @@ async function handleLogin() {
 
 <template>
   <div class="login-page">
-    <div class="login-page__hero">
-      <div class="login-page__badge">Fitness Action Evaluation</div>
-      <h1>基于图像的健身动作评价系统</h1>
-    </div>
-
-    <div class="login-panel soft-card">
-      <h2>用户登录</h2>
-      <el-form label-position="top" @submit.prevent="handleLogin">
-        <el-form-item label="用户名">
-          <el-input v-model="form.username" placeholder="请输入用户名" />
-        </el-form-item>
-        <el-form-item label="密码">
-          <el-input
-            v-model="form.password"
-            type="password"
-            placeholder="请输入密码"
-            show-password
-          />
-        </el-form-item>
-        <el-button
-          type="primary"
-          size="large"
-          native-type="submit"
-          style="width: 100%"
-          :loading="loading"
-        >
-          登录系统
-        </el-button>
-      </el-form>
-    </div>
+    <main class="login-main">
+      <h1 class="login-title">基于图像的健身动作评价系统</h1>
+      <div class="login-panel">
+        <h2>用户登录</h2>
+        <el-form label-position="top" @submit.prevent="handleLogin">
+          <el-form-item label="用户名">
+            <el-input v-model="form.username" placeholder="请输入用户名" size="large" />
+          </el-form-item>
+          <el-form-item label="密码">
+            <el-input
+              v-model="form.password"
+              type="password"
+              placeholder="请输入密码"
+              show-password
+              size="large"
+            />
+          </el-form-item>
+          <el-button
+            type="primary"
+            size="large"
+            native-type="submit"
+            class="login-panel__submit"
+            :loading="loading"
+          >
+            登录系统
+          </el-button>
+        </el-form>
+      </div>
+    </main>
   </div>
 </template>
 
 <style scoped>
 .login-page {
-  display: grid;
-  grid-template-columns: 1.2fr 0.9fr;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   min-height: 100vh;
-  padding: 40px;
-  gap: 32px;
   background:
-    linear-gradient(135deg, rgba(15, 118, 110, 0.14), transparent 35%),
-    radial-gradient(circle at right top, rgba(245, 158, 11, 0.16), transparent 24%);
+    linear-gradient(180deg, #f3f7f5 0%, #edf3f1 100%);
 }
 
-.login-page__hero {
+.login-main {
   display: flex;
+  align-items: center;
   flex-direction: column;
   justify-content: center;
-  padding: 48px;
+  width: 100%;
+  padding: 48px 24px;
 }
 
-.login-page__badge {
-  display: inline-flex;
-  width: fit-content;
-  padding: 10px 16px;
-  border-radius: 999px;
-  color: #115e59;
-  background: rgba(255, 255, 255, 0.7);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-.login-page__hero h1 {
-  margin: 20px 0 12px;
-  font-size: 54px;
-  line-height: 1.1;
+.login-title {
+  width: min(440px, 100%);
+  margin: 0 0 28px;
+  color: #0f3f3b;
+  font-size: 32px;
+  line-height: 1.35;
+  text-align: center;
+  font-weight: 800;
 }
 
 .login-panel {
-  align-self: center;
-  padding: 32px;
+  width: min(440px, 100%);
+  padding: 38px 40px 40px;
+  border: 1px solid rgba(15, 118, 110, 0.14);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 18px 48px rgba(15, 94, 89, 0.12);
 }
 
 .login-panel h2 {
-  margin: 0 0 20px;
+  margin: 0 0 26px;
+  color: #102f2c;
+  font-size: 24px;
+  line-height: 1.3;
+  text-align: center;
+}
+
+.login-panel__submit {
+  width: 100%;
+  margin-top: 6px;
+}
+
+:deep(.el-form-item__label) {
+  color: #193f3b;
+  font-weight: 600;
+}
+
+:deep(.el-input__wrapper) {
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px rgba(15, 118, 110, 0.2) inset;
+}
+
+:deep(.el-input__wrapper.is-focus) {
+  box-shadow: 0 0 0 1px #0f766e inset;
+}
+
+:deep(.el-button--primary) {
+  --el-button-bg-color: #0f766e;
+  --el-button-border-color: #0f766e;
+  --el-button-hover-bg-color: #115e59;
+  --el-button-hover-border-color: #115e59;
+  --el-button-active-bg-color: #134e4a;
+  --el-button-active-border-color: #134e4a;
+}
+
+@media (max-width: 900px) {
+  .login-main {
+    padding: 32px 18px;
+  }
+
+  .login-title {
+    font-size: 26px;
+  }
+
+  .login-panel {
+    padding: 30px 24px 32px;
+  }
 }
 </style>

@@ -10,7 +10,6 @@ const authStore = useAuthStore();
 const items = computed(() => {
   if (authStore.user?.role === "admin") {
     return [
-      { name: "dashboard", label: "系统概览", icon: "DataAnalysis" },
       { name: "users", label: "用户管理", icon: "User" },
       { name: "templates", label: "模板管理", icon: "FolderOpened" },
       { name: "evaluation-list", label: "评估结果", icon: "Tickets" },
